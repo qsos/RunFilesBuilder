@@ -1,7 +1,7 @@
 #=================================================
-# Build Tailscale GUI RunFiles (iStoreOS / OpenWrt)
+# Build Tailscale GUI RunFiles (Auto Latest Stable)
 #=================================================
-name: Make Tailscale GUI run files
+name: Make Tailscale GUI run files (Auto Latest)
 
 on:
   workflow_dispatch:
@@ -14,51 +14,66 @@ jobs:
       - name: 📥 Checkout
         uses: actions/checkout@v3
 
-      - name: 📦 安装依赖
-        run: sudo apt-get update && sudo apt-get install -y makeself curl
+      - name: 📦 Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y makeself curl jq
 
-      - name: 🚀 准备 x86_64 文件
+      - name: 🚀 Prepare x86_64 payload
         run: |
           set -e
 
           mkdir -p x86_64
           cd x86_64
 
-          echo "⬇️ 下载 LuCI Tailscale Community GUI"
+          echo "🔍 Fetching latest Tailscale stable version"
+          VERSION=$(curl -fsSL https://pkgs.tailscale.com/stable/?mode=json | jq -r '.Version')
+
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "❌ Failed to get Tailscale version"
+            exit 1
+          fi
+
+          echo "➡ Latest stable version: $VERSION"
+
+          echo "⬇️ Downloading tailscale core"
+          curl -fL \
+            https://pkgs.tailscale.com/stable/tailscale_${VERSION}_amd64.tgz \
+            -o tailscale.tgz
+
+          tar zxf tailscale.tgz
+          mv tailscale_${VERSION}_amd64/tailscale .
+          mv tailscale_${VERSION}_amd64/tailscaled .
+
+          chmod +x tailscale tailscaled
+          rm -rf tailscale_${VERSION}_amd64 tailscale.tgz
+
+          echo "⬇️ Downloading LuCI Tailscale Community GUI"
           curl -fL \
             https://dl.openwrt.ai/packages-24.10/x86_64/kiddin9/luci-app-tailscale-community_26.341.56069~77a6686_all.ipk \
             -o luci-app-tailscale-community.ipk
 
-          echo "⬇️ 下载 tailscale 核心（二进制）"
-          curl -fL \
-            https://pkgs.tailscale.com/stable/tailscale_1.90.2_amd64.tgz \
-            -o tailscale.tgz
+          echo "$VERSION" > VERSION
 
-          tar zxvf tailscale.tgz
-          mv tailscale_1.90.2_amd64/tailscale .
-          mv tailscale_1.90.2_amd64/tailscaled .
-
-          chmod +x tailscale tailscaled
-          rm -rf tailscale_1.90.2_amd64 tailscale.tgz
-
-      - name: 📋 放置 install.sh
+      - name: 📋 Copy install script
         run: |
           cp shell/install.sh x86_64/install.sh
           chmod +x x86_64/install.sh
 
-      - name: 📦 打包 run 文件
+      - name: 📦 Build .run installer
         run: |
+          VERSION=$(cat x86_64/VERSION)
           mkdir -p output
           makeself x86_64 \
-            output/tailscale-gui-community_x86_64.run \
-            "Tailscale GUI Community Installer (x86_64)" \
+            output/tailscale-gui-community_${VERSION}_x86_64.run \
+            "Tailscale GUI Community Installer ${VERSION} (x86_64)" \
             ./install.sh
 
-      - name: 📤 上传 Release
+      - name: 📤 Upload release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "tailscale-gui-community"
-          name: "tailscale-gui-community"
+          tag_name: "tailscale-${{ github.run_number }}"
+          name: "Tailscale GUI Auto Latest"
           files: output/*.run
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
