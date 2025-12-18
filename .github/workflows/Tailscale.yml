@@ -1,137 +1,111 @@
-name: Build Tailscale GUI RUN (iStoreOS)
+name: Make Tailscale GUI run files
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  make-run:
+    runs-on: ubuntu-22.04
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: 📥 Checkout
+        uses: actions/checkout@v3
 
-    - name: Prepare luci-app-tailscale (GUI + latest core)
-      run: |
-        set -e
+      - name: 📦 安装 makeself
+        run: sudo apt-get update && sudo apt-get install -y makeself curl
 
-        # 基础目录
-        mkdir -p files/usr/sbin
-        mkdir -p files/etc/init.d
-        mkdir -p files/etc/config
-        mkdir -p files/luasrc/controller
-        mkdir -p files/luasrc/model/cbi
+      - name: 🚀 准备 tailscale GUI 文件
+        run: |
+          set -e
 
-        # 下载最新版 tailscale（x86_64）
-        curl -fsSL https://pkgs.tailscale.com/stable/tailscale-linux-amd64.tgz -o ts.tgz
-        tar zxvf ts.tgz
-        TS_DIR=$(ls -d tailscale_*_amd64)
+          # 平台目录
+          mkdir -p x86_64/usr/sbin
+          mkdir -p x86_64/etc/init.d
+          mkdir -p x86_64/etc/config
+          mkdir -p x86_64/usr/lib/lua/luci/controller
+          mkdir -p x86_64/usr/lib/lua/luci/model/cbi
 
-        cp $TS_DIR/tailscale files/usr/sbin/
-        cp $TS_DIR/tailscaled files/usr/sbin/
-        chmod +x files/usr/sbin/*
+          # 下载最新版 tailscale
+          curl -fsSL https://pkgs.tailscale.com/stable/tailscale-linux-amd64.tgz -o ts.tgz
+          tar zxvf ts.tgz
+          TS=$(ls -d tailscale_*_amd64)
 
-        # UCI 配置
-        cat > files/etc/config/tailscale << 'EOF'
-        config tailscale 'main'
-            option enabled '0'
-            option authkey ''
-            option accept_routes '1'
-        EOF
+          cp $TS/tailscale x86_64/usr/sbin/
+          cp $TS/tailscaled x86_64/usr/sbin/
+          chmod +x x86_64/usr/sbin/*
 
-        # init.d 服务脚本
-        cat > files/etc/init.d/tailscale << 'EOF'
-        #!/bin/sh /etc/rc.common
-        START=99
-        STOP=10
-        USE_PROCD=1
+          # init.d
+          cat > x86_64/etc/init.d/tailscale << 'EOF'
+          #!/bin/sh /etc/rc.common
+          START=99
+          STOP=10
+          USE_PROCD=1
+          start_service() {
+              procd_open_instance
+              procd_set_param command /usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state
+              procd_set_param respawn
+              procd_close_instance
+          }
+          stop_service() {
+              killall tailscaled 2>/dev/null
+          }
+          EOF
+          chmod +x x86_64/etc/init.d/tailscale
 
-        start_service() {
-            procd_open_instance
-            procd_set_param command /usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state
-            procd_set_param respawn
-            procd_close_instance
-        }
+          # UCI
+          cat > x86_64/etc/config/tailscale << 'EOF'
+          config tailscale 'main'
+              option enabled '0'
+              option authkey ''
+              option accept_routes '1'
+          EOF
 
-        stop_service() {
-            killall tailscaled 2>/dev/null
-        }
-        EOF
-        chmod +x files/etc/init.d/tailscale
+          # LuCI controller
+          cat > x86_64/usr/lib/lua/luci/controller/tailscale.lua << 'EOF'
+          module("luci.controller.tailscale", package.seeall)
+          function index()
+              entry({"admin","services","tailscale"}, cbi("tailscale"), _("Tailscale"), 90)
+          end
+          EOF
 
-        # LuCI 控制器
-        cat > files/luasrc/controller/tailscale.lua << 'EOF'
-        module("luci.controller.tailscale", package.seeall)
+          # LuCI page
+          cat > x86_64/usr/lib/lua/luci/model/cbi/tailscale.lua << 'EOF'
+          local sys = require "luci.sys"
+          local uci = require "luci.model.uci".cursor()
+          m = Map("tailscale","Tailscale","Tailscale GUI")
+          s = m:section(TypedSection,"tailscale","设置")
+          s.anonymous = true
+          s:option(Flag,"enabled","启用")
+          ak = s:option(Value,"authkey","AuthKey")
+          ak.password = true
+          s:option(Flag,"accept_routes","接受路由")
+          btn = s:option(Button,"apply","应用")
+          btn.inputstyle = "apply"
+          function btn.write()
+              sys.call("/etc/init.d/tailscale start")
+              sys.call("tailscale up --accept-routes")
+          end
+          return m
+          EOF
 
-        function index()
-            entry({"admin", "services", "tailscale"}, cbi("tailscale"), _("Tailscale"), 90)
-        end
-        EOF
+          # install.sh
+          cat > x86_64/install.sh << 'EOF'
+          #!/bin/sh
+          cp -r ./* /
+          /etc/init.d/tailscale enable
+          /etc/init.d/tailscale start
+          echo "Tailscale GUI installed"
+          EOF
+          chmod +x x86_64/install.sh
 
-        # LuCI 页面（GUI 核心）
-        cat > files/luasrc/model/cbi/tailscale.lua << 'EOF'
-        local sys = require "luci.sys"
-        local uci = require "luci.model.uci".cursor()
+      - name: 📦 打包 run
+        run: |
+          mkdir -p output
+          makeself x86_64 output/tailscale-gui_x86_64.run \
+            "Tailscale GUI Installer" ./install.sh
 
-        m = Map("tailscale", "Tailscale",
-            "通过图形界面管理 Tailscale（使用最新版内核）")
-
-        s = m:section(TypedSection, "tailscale", "设置")
-        s.anonymous = true
-
-        en = s:option(Flag, "enabled", "启用 Tailscale")
-        en.rmempty = false
-
-        ak = s:option(Value, "authkey", "Auth Key")
-        ak.password = true
-        ak.rmempty = true
-
-        ar = s:option(Flag, "accept_routes", "接受子网路由")
-        ar.rmempty = false
-
-        btn = s:option(Button, "apply", "应用并登录")
-        btn.inputstyle = "apply"
-
-        function btn.write(self, section)
-            local enabled = uci:get("tailscale", section, "enabled")
-            local authkey = uci:get("tailscale", section, "authkey")
-            local accept_routes = uci:get("tailscale", section, "accept_routes")
-
-            if enabled == "1" then
-                sys.call("/etc/init.d/tailscale start")
-                if authkey and authkey ~= "" then
-                    local cmd = "tailscale up --authkey=" .. authkey
-                    if accept_routes == "1" then
-                        cmd = cmd .. " --accept-routes"
-                    end
-                    sys.call(cmd)
-                end
-            else
-                sys.call("/etc/init.d/tailscale stop")
-            end
-        end
-
-        st = s:option(DummyValue, "_status", "当前状态")
-        function st.cfgvalue()
-            local rv = sys.exec("tailscale status 2>/dev/null")
-            if rv == "" then
-                return "未运行"
-            end
-            return "<pre>" .. rv .. "</pre>"
-        end
-
-        return m
-        EOF
-
-    - name: Build RUN package
-      uses: wukongdaily/RunFilesBuilder@main
-      with:
-        plugin_name: luci-app-tailscale-gui
-        plugin_version: latest
-        files_path: files
-
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: tailscale-gui-run
-        path: output/*.run
+      - name: 📤 上传 run
+        uses: actions/upload-artifact@v4
+        with:
+          name: tailscale-gui
+          path: output/*.run
