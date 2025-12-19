@@ -1,32 +1,26 @@
 #!/bin/sh
-# Tailscale .run installer script
-# Version: 1.92.3
-
 set -e
 
-PREFIX=/usr/local
-BIN_DIR="$PREFIX/bin"
-VAR_DIR="/var/lib/tailscale"
+echo "========================================"
+echo "  Installing Tailscale (GUI Edition)"
+echo "========================================"
 
-echo "==> Installing Tailscale 1.92.3"
+cd "$(dirname "$0")"
 
-mkdir -p "$BIN_DIR"
-mkdir -p "$VAR_DIR"
+echo "[1/4] Stop existing service (if any)"
+/etc/init.d/tailscale stop 2>/dev/null || true
 
-install -m 0755 tailscaled "$BIN_DIR/tailscaled"
-install -m 0755 tailscale  "$BIN_DIR/tailscale"
+echo "[2/4] Install tailscale core"
+opkg install ./tailscale_*.ipk --force-reinstall
 
-if command -v systemctl >/dev/null 2>&1; then
-    echo "==> Installing systemd service"
-    install -m 0644 tailscaled.service /etc/systemd/system/tailscaled.service
-    systemctl daemon-reexec
-    systemctl daemon-reload
-    systemctl enable tailscaled
-    systemctl restart tailscaled
-else
-    echo "==> systemd not found, skipping service install"
-fi
+echo "[3/4] Install LuCI GUI"
+opkg install ./luci-app-tailscale-community_*.ipk --force-reinstall
 
-echo
-echo "Tailscale installed successfully."
-echo "Run: tailscale up"
+echo "[4/4] Enable and start service"
+/etc/init.d/tailscale enable
+/etc/init.d/tailscale start
+
+echo "----------------------------------------"
+echo " Installation complete"
+echo " LuCI path: Services → Tailscale"
+echo "----------------------------------------"
