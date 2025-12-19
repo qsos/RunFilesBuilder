@@ -1,4 +1,4 @@
-name: Make Tailscale Community GUI run
+name: Build Tailscale .run (x86_64)
 
 on:
   workflow_dispatch:
@@ -8,46 +8,61 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: 📥 Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: 📦 Install tools
+      - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y makeself curl
+          sudo apt update
+          sudo apt install -y golang make gcc tar gzip
 
-      - name: ⬇️ Download tailscale core
+      - name: Download Tailscale source (v1.92.3)
         run: |
-          mkdir -p x86_64
-          curl -L https://pkgs.tailscale.com/stable/tailscale_1.92.1_amd64.tgz -o tailscale.tgz
-          tar zxvf tailscale.tgz
-          cp tailscale_*/tailscale x86_64/
-          cp tailscale_*/tailscaled x86_64/
+          curl -L -o tailscale-src.tar.gz \
+          https://codeload.github.com/tailscale/tailscale/tar.gz/refs/tags/v1.92.3
 
-      - name: ⬇️ Download LuCI GUI ipk
+          tar xf tailscale-src.tar.gz
+          mv tailscale-* tailscale-src
+
+      - name: Build tailscale binaries
         run: |
-          cd x86_64
-          curl -L https://dl.openwrt.ai/packages-24.10/x86_64/kiddin9/luci-app-tailscale-community_26.341.56069~77a6686_all.ipk \
-            -o luci-app-tailscale-community.ipk
+          cd tailscale-src
+          export CGO_ENABLED=0
+          export GOOS=linux
+          export GOARCH=amd64
+          go build -o tailscaled ./cmd/tailscaled
+          go build -o tailscale  ./cmd/tailscale
 
-      - name: 📋 Copy install script
+      - name: Prepare run package directory
         run: |
-          cp shell/install-tailscale.sh x86_64/install.sh
-          chmod +x x86_64/install.sh
+          mkdir -p runpkg
+          cp tailscale-src/tailscaled runpkg/
+          cp tailscale-src/tailscale  runpkg/
+          cp tailscale-src/cmd/tailscaled/tailscaled.service runpkg/
+          cp shell/install-tailscale.sh runpkg/install.sh
+          chmod +x runpkg/install.sh
 
-      - name: 📦 Build run file
+      - name: Build .run installer
         run: |
-          mkdir -p output
-          makeself x86_64 \
-            output/tailscale-community-x86_64.run \
-            "Tailscale Community GUI Installer (x86_64)" \
-            ./install.sh
+          cd runpkg
+          cat > tailscale-1.92.3-x86_64.run <<'EOF'
+#!/bin/sh
+set -e
+TMPDIR=$(mktemp -d)
+ARCHIVE_LINE=$(awk '/^__ARCHIVE_BELOW__/ {print NR + 1; exit 0; }' "$0")
+tail -n +"$ARCHIVE_LINE" "$0" | tar xz -C "$TMPDIR"
+cd "$TMPDIR"
+sh install.sh
+exit 0
+__ARCHIVE_BELOW__
+EOF
 
-      - name: 📤 Upload to Release
-        uses: softprops/action-gh-release@v2
+          tar czf payload.tar.gz *
+          cat payload.tar.gz >> tailscale-1.92.3-x86_64.run
+          chmod +x tailscale-1.92.3-x86_64.run
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: "tailscale-community"
-          name: "tailscale-community"
-          files: output/*.run
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: tailscale-run
+          path: runpkg/tailscale-1.92.3-x86_64.run
