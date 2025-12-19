@@ -1,48 +1,32 @@
 #!/bin/sh
+# Tailscale .run installer script
+# Version: 1.92.3
+
 set -e
 
-echo "======================================"
-echo "   Tailscale Community GUI Installer  "
-echo "======================================"
+PREFIX=/usr/local
+BIN_DIR="$PREFIX/bin"
+VAR_DIR="/var/lib/tailscale"
 
-ARCH="$(uname -m)"
-if [ "$ARCH" != "x86_64" ]; then
-  echo "❌ 当前架构：$ARCH"
-  echo "❌ 仅支持 x86_64"
-  exit 1
+echo "==> Installing Tailscale 1.92.3"
+
+mkdir -p "$BIN_DIR"
+mkdir -p "$VAR_DIR"
+
+install -m 0755 tailscaled "$BIN_DIR/tailscaled"
+install -m 0755 tailscale  "$BIN_DIR/tailscale"
+
+if command -v systemctl >/dev/null 2>&1; then
+    echo "==> Installing systemd service"
+    install -m 0644 tailscaled.service /etc/systemd/system/tailscaled.service
+    systemctl daemon-reexec
+    systemctl daemon-reload
+    systemctl enable tailscaled
+    systemctl restart tailscaled
+else
+    echo "==> systemd not found, skipping service install"
 fi
 
-echo "➡ 安装 tailscale 核心程序"
-install -m 0755 tailscale /usr/sbin/tailscale
-install -m 0755 tailscaled /usr/sbin/tailscaled
-
-echo "➡ 安装 LuCI 图形界面（community）"
-opkg install --force-reinstall ./luci-app-tailscale-community.ipk
-
-echo "➡ 写入 init 启动脚本（如果不存在）"
-if [ ! -f /etc/init.d/tailscaled ]; then
-cat << 'EOF' > /etc/init.d/tailscaled
-#!/bin/sh /etc/rc.common
-USE_PROCD=1
-START=99
-STOP=10
-
-start_service() {
-  procd_open_instance
-  procd_set_param command /usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state
-  procd_set_param respawn
-  procd_close_instance
-}
-EOF
-chmod +x /etc/init.d/tailscaled
-fi
-
-echo "➡ 启用并启动 tailscaled"
- /etc/init.d/tailscaled enable
- /etc/init.d/tailscaled restart || /etc/init.d/tailscaled start
-
-echo "======================================"
-echo "✅ 安装完成"
-echo "👉 LuCI → VPN → Tailscale Community"
-echo "👉 登录方式：点击「Login」→ 浏览器授权"
-echo "======================================"
+echo
+echo "Tailscale installed successfully."
+echo "Run: tailscale up"
