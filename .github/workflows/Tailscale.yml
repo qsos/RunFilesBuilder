@@ -11,15 +11,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y curl tar gcc musl-tools makeself
 
-      - name: Setup Go 1.25.5
-        uses: actions/setup-go@v4
-        with:
-          go-version: 1.25.5
+      - name: Install Go 1.25.5
+        run: |
+          curl -LO https://go.dev/dl/go1.25.5.linux-amd64.tar.gz
+          sudo rm -rf /usr/local/go
+          sudo tar -C /usr/local -xzf go1.25.5.linux-amd64.tar.gz
+          echo "export PATH=/usr/local/go/bin:$PATH" >> $GITHUB_ENV
+          go version
 
       - name: Download Tailscale source
         run: |
@@ -30,6 +33,7 @@ jobs:
 
       - name: Compile Tailscale x86_64 musl
         run: |
+          export PATH=/usr/local/go/bin:$PATH
           cd tailscale-src
           CC=musl-gcc GOOS=linux GOARCH=amd64 go build -o tailscaled ./cmd/tailscaled
           CC=musl-gcc GOOS=linux GOARCH=amd64 go build -o tailscale ./cmd/tailscale
