@@ -1,57 +1,55 @@
-name: Build Tailscale RUN (iStoreOS GUI)
+name: Build Tailscale Run
 
 on:
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Install build tools
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl tar makeself
+          sudo apt-get install -y curl tar gcc musl-tools golang makeself
 
-      - name: Prepare directories
+      - name: Download Tailscale source
+        run: |
+          mkdir -p tailscale-src
+          curl -L -o tailscale-src/tailscale-1.92.3.tar.gz \
+               https://codeload.github.com/tailscale/tailscale/tar.gz/refs/tags/v1.92.3
+          tar zxvf tailscale-src/tailscale-1.92.3.tar.gz -C tailscale-src --strip-components=1
+
+      - name: Compile Tailscale x86_64 musl
+        run: |
+          cd tailscale-src
+          CC=musl-gcc GOOS=linux GOARCH=amd64 go build -o tailscaled ./cmd/tailscaled
+          CC=musl-gcc GOOS=linux GOARCH=amd64 go build -o tailscale ./cmd/tailscale
+          mkdir -p x86_64
+          mv tailscaled tailscale x86_64/
+
+      - name: Copy LuCI ipk
         run: |
           mkdir -p x86_64
-          mkdir -p output
-
-      - name: Download Tailscale core & LuCI GUI
-        run: |
-          set -e
-          cd x86_64
-
-          BASE_URL="https://dl.openwrt.ai/packages-24.10/x86_64/kiddin9"
-
-          echo "⬇️ Download tailscale core"
-          curl -LO ${BASE_URL}/tailscale_1.92.3-1_x86_64.ipk
-
-          echo "⬇️ Download luci GUI"
-          curl -LO ${BASE_URL}/luci-app-tailscale-community_26.341.56069~77a6686_all.ipk
+          cp shell/luci-app-tailscale_1.2.6-r19_all.ipk x86_64/
 
       - name: Copy install script
-        run: |
-          cp shell/install-tailscale.sh x86_64/install-tailscale.sh
-          chmod +x x86_64/install-tailscale.sh
+        run: cp shell/install-tailscale.sh x86_64/
 
       - name: Build .run package
         run: |
-          VERSION=1.92.3
-          makeself x86_64 \
-            output/tailscale-gui-${VERSION}-x86_64.run \
-            "Tailscale GUI Installer for iStoreOS ${VERSION}" \
-            ./install-tailscale.sh
+          cd x86_64
+          chmod +x install-tailscale.sh
+          makeself --notemp . ../tailscale-1.92.3.run "Tailscale Installer 1.92.3" ./install-tailscale.sh
 
-      - name: Upload .run artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload .run to release
+        uses: softprops/action-gh-release@v2.1.0
         with:
-          name: tailscale-run
-          path: output/*.run
+          tag_name: "tailscale-1.92.3"
+          name: "tailscale-1.92.3.run"
+          files: tailscale-1.92.3.run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
