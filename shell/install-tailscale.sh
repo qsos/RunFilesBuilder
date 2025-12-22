@@ -1,26 +1,30 @@
 #!/bin/sh
 set -e
 
-echo "========================================"
-echo "  Installing Tailscale (GUI Edition)"
-echo "========================================"
+echo "============================="
+echo "安装 Tailscale 核心二进制..."
+echo "============================="
 
-cd "$(dirname "$0")"
+# 安装核心二进制
+opkg install tailscaled tailscale || true
 
-echo "[1/4] Stop existing service (if any)"
-/etc/init.d/tailscale stop 2>/dev/null || true
+echo "============================="
+echo "安装 LuCI 界面..."
+echo "============================="
 
-echo "[2/4] Install tailscale core"
-opkg install ./tailscale_*.ipk --force-reinstall
+# 安装现有 LuCI ipk
+opkg install luci-app-tailscale_1.2.6-r19_all.ipk || true
 
-echo "[3/4] Install LuCI GUI"
-opkg install ./luci-app-tailscale-community_*.ipk --force-reinstall
+echo "============================="
+echo "重启 uhttpd 服务..."
+echo "============================="
+/etc/init.d/uhttpd restart
 
-echo "[4/4] Enable and start service"
-/etc/init.d/tailscale enable
-/etc/init.d/tailscale start
+echo "============================="
+echo "启动 tailscaled 服务..."
+echo "============================="
+/usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state \
+                     --socket=/var/run/tailscale/tailscaled.sock &
+sleep 2
 
-echo "----------------------------------------"
-echo " Installation complete"
-echo " LuCI path: Services → Tailscale"
-echo "----------------------------------------"
+echo "安装完成，Tailscale 内核已升级，LuCI 界面保留。"
