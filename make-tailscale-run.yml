@@ -1,0 +1,51 @@
+name: Make Tailscale GUI run file
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y makeself curl tar
+
+      - name: Download latest Tailscale core
+        run: |
+          set -e
+          VERSION=$(curl -s https://api.github.com/repos/tailscale/tailscale/releases/latest | grep tag_name | cut -d\" -f4)
+          echo "Using $VERSION"
+          curl -L -o tailscale.tgz \
+            https://codeload.github.com/tailscale/tailscale/tar.gz/refs/tags/${VERSION}
+          tar zxf tailscale.tgz
+          cd tailscale-*
+          GO_VERSION=$(grep "^go " go.mod | awk '{print $2}')
+          sudo apt-get install -y golang-${GO_VERSION} || sudo apt-get install -y golang
+          export CGO_ENABLED=0
+          go build ./cmd/tailscale
+          go build ./cmd/tailscaled
+          mkdir -p ../x86_64/bin
+          cp tailscale tailscaled ../x86_64/bin/
+
+      - name: Prepare installer
+        run: |
+          cp shell/install-tailscale.sh x86_64/install.sh
+          chmod +x x86_64/install.sh
+
+      - name: Build run
+        run: |
+          mkdir -p output
+          makeself x86_64 output/tailscale-gui-x86_64.run \
+            "Tailscale GUI Installer (iStoreOS)" ./install.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tailscale-run
+          path: output/*.run
