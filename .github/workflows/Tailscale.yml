@@ -1,143 +1,51 @@
-name: Build Tailscale .run (x86 & arm64)
+name: Make Tailscale GUI run file
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Tailscale Version (留空自动最新)'
-        required: false
-        default: ''
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    
-    # === 核心修改：定义矩阵策略 ===
-    strategy:
-      fail-fast: false # 一个失败不影响另一个
-      matrix:
-        include:
-          # --- x86 任务配置 ---
-          - arch: amd64             # 官方下载用的架构名 (Tailscale服务器上叫amd64)
-            output_name: x86        # 最终输出文件名显示的名称 (您希望叫x86)
-            openwrt_arch: x86_64    # OpenWrt源里的架构名
-            
-          # --- ARM64 任务配置 ---
-          - arch: arm64             # 官方下载用的架构名
-            output_name: arm64      # 最终输出文件名显示的名称
-            openwrt_arch: aarch64_cortex-a53 # OpenWrt源里的架构名(适用R2S/R4S/树莓派)
+    runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v3
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y makeself jq curl
+          sudo apt-get install -y makeself curl tar
 
-      - name: Determine Version
-        id: meta
+      - name: Download latest Tailscale core
         run: |
-          if [ -z "${{ inputs.version }}" ]; then
-            TAG=$(curl -sL https://api.github.com/repos/tailscale/tailscale/releases/latest | jq -r ".tag_name")
-            VERSION=${TAG#v}
-          else
-            VERSION=${{ inputs.version }}
-          fi
-          # 打印一下当前任务的目标名称，方便调试
-          echo "Building for: ${{ matrix.output_name }}"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          set -e
+          VERSION=$(curl -s https://api.github.com/repos/tailscale/tailscale/releases/latest | grep tag_name | cut -d\" -f4)
+          echo "Using $VERSION"
+          curl -L -o tailscale.tgz \
+            https://codeload.github.com/tailscale/tailscale/tar.gz/refs/tags/${VERSION}
+          tar zxf tailscale.tgz
+          cd tailscale-*
+          GO_VERSION=$(grep "^go " go.mod | awk '{print $2}')
+          sudo apt-get install -y golang-${GO_VERSION} || sudo apt-get install -y golang
+          export CGO_ENABLED=0
+          go build ./cmd/tailscale
+          go build ./cmd/tailscaled
+          mkdir -p ../x86_64/bin
+          cp tailscale tailscaled ../x86_64/bin/
 
-      - name: Download Official Binaries
+      - name: Prepare installer
         run: |
-          VERSION=${{ steps.meta.outputs.version }}
-          # 注意：下载时必须用 Tailscale 官方识别的架构名 (matrix.arch)
-          DL_ARCH=${{ matrix.arch }}
-          
-          echo "Downloading Tailscale v$VERSION for $DL_ARCH..."
-          curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${VERSION}_${DL_ARCH}.tgz" -o tailscale.tgz
-          tar xzf tailscale.tgz
-          
-          mkdir -p staging/bin
-          # 提取目录名也会随架构变化
-          EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "tailscale_*_${DL_ARCH}" | head -n 1)
-          mv "$EXTRACTED_DIR/tailscale" staging/bin/
-          mv "$EXTRACTED_DIR/tailscaled" staging/bin/
-          rm -f tailscale.tgz
-          rm -rf "$EXTRACTED_DIR"
+          cp shell/install-tailscale.sh x86_64/install.sh
+          chmod +x x86_64/install.sh
 
-      - name: Download LuCI & Language Packs
+      - name: Build run
         run: |
-          mkdir -p staging/pkgs
-          OPKG_ARCH=${{ matrix.openwrt_arch }}
-          echo "Downloading LuCI for OpenWrt 21.02 ($OPKG_ARCH)..."
-          
-          # 基础 URL 根据架构变化，确保下载到正确 CPU 架构的 IPK 包
-          BASE_URL="https://downloads.openwrt.org/releases/21.02.7/packages/$OPKG_ARCH/packages"
-          
-          # 使用 curl -fL 确保下载失败时报错 (LuCI包名为通用all，但需要从特定架构目录下载)
-          curl -fL -o staging/pkgs/luci-app.ipk "$BASE_URL/luci-app-tailscale_git-21.231.26241-f952028_all.ipk" || echo "LuCI App DL Failed (Ignore if local exists)"
-          curl -fL -o staging/pkgs/luci-i18n.ipk "$BASE_URL/luci-i18n-tailscale-zh-cn_git-21.231.26241-f952028_all.ipk" || echo "Lang Pack DL Failed (Ignore if local exists)"
+          mkdir -p output
+          makeself x86_64 output/tailscale-gui-x86_64.run \
+            "Tailscale GUI Installer (iStoreOS)" ./install.sh
 
-      - name: Generate Install Script (General)
-        run: |
-          # 安装脚本是通用的
-          cat << 'EOF' > staging/install.sh
-          #!/bin/sh
-          
-          echo ">>> 1. Installing Core Binaries..."
-          cp -f bin/tailscale /usr/sbin/tailscale
-          cp -f bin/tailscaled /usr/sbin/tailscaled
-          chmod +x /usr/sbin/tailscale /usr/sbin/tailscaled
-          
-          echo ">>> 2. Installing GUI (Force Extract Mode)..."
-          install_ipk_manual() {
-              IPK_FILE="$1"
-              if [ -f "$IPK_FILE" ]; then
-                  echo "Extracting $IPK_FILE ..."
-                  mkdir -p /tmp/ts_install_temp
-                  tar xzf "$IPK_FILE" -C /tmp/ts_install_temp
-                  tar xzf /tmp/ts_install_temp/data.tar.gz -C /
-                  rm -rf /tmp/ts_install_temp
-              else
-                  echo "Warning: $IPK_FILE not found. GUI may not show."
-              fi
-          }
-          install_ipk_manual "pkgs/luci-app.ipk"
-          install_ipk_manual "pkgs/luci-i18n.ipk"
-          
-          echo ">>> 3. Configuring System..."
-          if [ ! -f /etc/config/tailscale ]; then touch /etc/config/tailscale; fi
-          chmod +x /etc/init.d/tailscale
-          if [ -f /usr/share/rpcd/acl.d/luci-app-tailscale.json ]; then /etc/init.d/rpcd reload; fi
-          rm -rf /tmp/luci-indexcache
-          rm -rf /tmp/luci-modulecache/
-          /etc/init.d/tailscale enable
-          /etc/init.d/tailscale restart
-          
-          echo "======================================================="
-          echo "✅ 安装完成！请按 Ctrl+F5 强制刷新浏览器。"
-          echo "入口位置：服务 (Services) -> Tailscale"
-          echo "======================================================="
-          EOF
-          chmod +x staging/install.sh
-
-      - name: Build .run Package
-        run: |
-          VERSION=${{ steps.meta.outputs.version }}
-          # === 关键修改：使用自定义的 output_name 作为文件名的一部分 ===
-          OUT_NAME=${{ matrix.output_name }}
-          makeself --notemp staging tailscale-${VERSION}-${OUT_NAME}.run "Tailscale ${VERSION} (${OUT_NAME}) Installer" ./install.sh
-
-      - name: Upload Release
-        uses: softprops/action-gh-release@v1
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: "v${{ steps.meta.outputs.version }}-dual"
-          name: "Tailscale v${{ steps.meta.outputs.version }} (x86 & arm64)"
-          # === 关键修改：上传时也使用自定义文件名 ===
-          files: tailscale-${{ steps.meta.outputs.version }}-${{ matrix.output_name }}.run
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: tailscale-run
+          path: output/*.run
