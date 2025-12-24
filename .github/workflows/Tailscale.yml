@@ -1,4 +1,4 @@
-name: Build Tailscale .run (Force GUI)
+name: Build Tailscale .run (x86 & arm64)
 
 on:
   workflow_dispatch:
@@ -13,6 +13,21 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    
+    # === 核心修改：定义矩阵策略 ===
+    strategy:
+      fail-fast: false # 一个失败不影响另一个
+      matrix:
+        include:
+          # --- x86 任务配置 ---
+          - arch: amd64             # 官方下载用的架构名 (Tailscale服务器上叫amd64)
+            output_name: x86        # 最终输出文件名显示的名称 (您希望叫x86)
+            openwrt_arch: x86_64    # OpenWrt源里的架构名
+            
+          # --- ARM64 任务配置 ---
+          - arch: arm64             # 官方下载用的架构名
+            output_name: arm64      # 最终输出文件名显示的名称
+            openwrt_arch: aarch64_cortex-a53 # OpenWrt源里的架构名(适用R2S/R4S/树莓派)
 
     steps:
       - name: Checkout repository
@@ -32,17 +47,23 @@ jobs:
           else
             VERSION=${{ inputs.version }}
           fi
+          # 打印一下当前任务的目标名称，方便调试
+          echo "Building for: ${{ matrix.output_name }}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Download Official Binaries
         run: |
           VERSION=${{ steps.meta.outputs.version }}
-          # 下载官方静态包
-          curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${VERSION}_amd64.tgz" -o tailscale.tgz
+          # 注意：下载时必须用 Tailscale 官方识别的架构名 (matrix.arch)
+          DL_ARCH=${{ matrix.arch }}
+          
+          echo "Downloading Tailscale v$VERSION for $DL_ARCH..."
+          curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${VERSION}_${DL_ARCH}.tgz" -o tailscale.tgz
           tar xzf tailscale.tgz
           
           mkdir -p staging/bin
-          EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "tailscale_*_amd64" | head -n 1)
+          # 提取目录名也会随架构变化
+          EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "tailscale_*_${DL_ARCH}" | head -n 1)
           mv "$EXTRACTED_DIR/tailscale" staging/bin/
           mv "$EXTRACTED_DIR/tailscaled" staging/bin/
           rm -f tailscale.tgz
@@ -51,20 +72,19 @@ jobs:
       - name: Download LuCI & Language Packs
         run: |
           mkdir -p staging/pkgs
+          OPKG_ARCH=${{ matrix.openwrt_arch }}
+          echo "Downloading LuCI for OpenWrt 21.02 ($OPKG_ARCH)..."
           
-          echo "Downloading LuCI App (OpenWrt 21.02 Compatible)..."
-          # 使用 OpenWrt 21.02 源，这是 iStoreOS 的底层版本，兼容性最好
-          # 如果下载失败，请手动将 ipk 上传到仓库 shell 目录
-          BASE_URL="https://downloads.openwrt.org/releases/21.02.7/packages/x86_64/packages"
+          # 基础 URL 根据架构变化，确保下载到正确 CPU 架构的 IPK 包
+          BASE_URL="https://downloads.openwrt.org/releases/21.02.7/packages/$OPKG_ARCH/packages"
           
-          # 1. 下载主程序 LuCI
-          curl -L -o staging/pkgs/luci-app.ipk "$BASE_URL/luci-app-tailscale_git-21.231.26241-f952028_all.ipk" || echo "App DL Failed"
-          
-          # 2. 下载中文包 (iStoreOS 必备)
-          curl -L -o staging/pkgs/luci-i18n.ipk "$BASE_URL/luci-i18n-tailscale-zh-cn_git-21.231.26241-f952028_all.ipk" || echo "Lang DL Failed"
+          # 使用 curl -fL 确保下载失败时报错 (LuCI包名为通用all，但需要从特定架构目录下载)
+          curl -fL -o staging/pkgs/luci-app.ipk "$BASE_URL/luci-app-tailscale_git-21.231.26241-f952028_all.ipk" || echo "LuCI App DL Failed (Ignore if local exists)"
+          curl -fL -o staging/pkgs/luci-i18n.ipk "$BASE_URL/luci-i18n-tailscale-zh-cn_git-21.231.26241-f952028_all.ipk" || echo "Lang Pack DL Failed (Ignore if local exists)"
 
-      - name: Generate Install Script (Force Extract)
+      - name: Generate Install Script (General)
         run: |
+          # 安装脚本是通用的
           cat << 'EOF' > staging/install.sh
           #!/bin/sh
           
@@ -74,71 +94,50 @@ jobs:
           chmod +x /usr/sbin/tailscale /usr/sbin/tailscaled
           
           echo ">>> 2. Installing GUI (Force Extract Mode)..."
-          
-          # 函数：暴力解压 IPK，不依赖 opkg
           install_ipk_manual() {
               IPK_FILE="$1"
               if [ -f "$IPK_FILE" ]; then
                   echo "Extracting $IPK_FILE ..."
-                  # 创建临时目录
                   mkdir -p /tmp/ts_install_temp
                   tar xzf "$IPK_FILE" -C /tmp/ts_install_temp
-                  # 解压 data.tar.gz 到根目录
                   tar xzf /tmp/ts_install_temp/data.tar.gz -C /
-                  # 清理
                   rm -rf /tmp/ts_install_temp
               else
-                  echo "Warning: $IPK_FILE not found!"
+                  echo "Warning: $IPK_FILE not found. GUI may not show."
               fi
           }
-          
-          # 执行解压
           install_ipk_manual "pkgs/luci-app.ipk"
           install_ipk_manual "pkgs/luci-i18n.ipk"
           
           echo ">>> 3. Configuring System..."
-          
-          # 确保配置文件存在
-          if [ ! -f /etc/config/tailscale ]; then
-              touch /etc/config/tailscale
-          fi
-          
-          # 确保启动脚本有权限
+          if [ ! -f /etc/config/tailscale ]; then touch /etc/config/tailscale; fi
           chmod +x /etc/init.d/tailscale
-          
-          # 注册 RPC 服务 (重要：否则菜单不显示)
-          if [ -f /usr/share/rpcd/acl.d/luci-app-tailscale.json ]; then
-             /etc/init.d/rpcd reload
-          fi
-          
-          # 清除 LuCI 缓存 (最重要的一步)
+          if [ -f /usr/share/rpcd/acl.d/luci-app-tailscale.json ]; then /etc/init.d/rpcd reload; fi
           rm -rf /tmp/luci-indexcache
           rm -rf /tmp/luci-modulecache/
-          
-          # 重启服务
           /etc/init.d/tailscale enable
           /etc/init.d/tailscale restart
           
           echo "======================================================="
-          echo "✅ 安装完成！"
-          echo "请按 Ctrl+F5 强制刷新浏览器。"
-          echo "入口位置：iStoreOS -> 服务 (Services) -> Tailscale"
-          echo "或者：iStoreOS -> VPN -> Tailscale"
+          echo "✅ 安装完成！请按 Ctrl+F5 强制刷新浏览器。"
+          echo "入口位置：服务 (Services) -> Tailscale"
           echo "======================================================="
           EOF
-          
           chmod +x staging/install.sh
 
       - name: Build .run Package
         run: |
           VERSION=${{ steps.meta.outputs.version }}
-          makeself --notemp staging tailscale-${VERSION}.run "Tailscale ${VERSION} (GUI Fixed)" ./install.sh
+          # === 关键修改：使用自定义的 output_name 作为文件名的一部分 ===
+          OUT_NAME=${{ matrix.output_name }}
+          makeself --notemp staging tailscale-${VERSION}-${OUT_NAME}.run "Tailscale ${VERSION} (${OUT_NAME}) Installer" ./install.sh
 
       - name: Upload Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "v${{ steps.meta.outputs.version }}-gui-fix"
-          name: "Tailscale v${{ steps.meta.outputs.version }} (Force GUI)"
-          files: tailscale-${{ steps.meta.outputs.version }}.run
+          tag_name: "v${{ steps.meta.outputs.version }}-dual"
+          name: "Tailscale v${{ steps.meta.outputs.version }} (x86 & arm64)"
+          # === 关键修改：上传时也使用自定义文件名 ===
+          files: tailscale-${{ steps.meta.outputs.version }}-${{ matrix.output_name }}.run
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
