@@ -1,10 +1,10 @@
-name: Build Tailscale .run (Fix GUI)
+name: Build Tailscale .run (Force GUI)
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Tailscale Version (留空则自动获取最新)'
+        description: 'Tailscale Version (留空自动最新)'
         required: false
         default: ''
 
@@ -32,15 +32,13 @@ jobs:
           else
             VERSION=${{ inputs.version }}
           fi
-          echo "Target Version: $VERSION"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Download Official Static Binaries
+      - name: Download Official Binaries
         run: |
           VERSION=${{ steps.meta.outputs.version }}
-          # 下载官方 amd64 静态包
-          DOWNLOAD_URL="https://pkgs.tailscale.com/stable/tailscale_${VERSION}_amd64.tgz"
-          curl -fSL "$DOWNLOAD_URL" -o tailscale.tgz
+          # 下载官方静态包
+          curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${VERSION}_amd64.tgz" -o tailscale.tgz
           tar xzf tailscale.tgz
           
           mkdir -p staging/bin
@@ -50,67 +48,83 @@ jobs:
           rm -f tailscale.tgz
           rm -rf "$EXTRACTED_DIR"
 
-      - name: Prepare LuCI App (GUI)
+      - name: Download LuCI & Language Packs
         run: |
           mkdir -p staging/pkgs
           
-          # 优先检查仓库 shell 目录下是否有自定义 ipk
-          if [ -f "shell/luci-app-tailscale.ipk" ]; then
-            echo "Using local IPK from repository..."
-            cp shell/luci-app-tailscale.ipk staging/pkgs/luci-app-tailscale.ipk
-          else
-            echo "Downloading generic OpenWrt LuCI app..."
-            # 使用 OpenWrt 22.03 的官方包，兼容性较好 (iStoreOS 基于 21/22)
-            # 注意：如果这个链接失效，脚本会自动创建一个空文件避免报错，但在路由器上就不会有界面
-            curl -L -o staging/pkgs/luci-app-tailscale.ipk https://downloads.openwrt.org/releases/packages-22.03/x86_64/packages/luci-app-tailscale_1.1.1-1_all.ipk
-          fi
+          echo "Downloading LuCI App (OpenWrt 21.02 Compatible)..."
+          # 使用 OpenWrt 21.02 源，这是 iStoreOS 的底层版本，兼容性最好
+          # 如果下载失败，请手动将 ipk 上传到仓库 shell 目录
+          BASE_URL="https://downloads.openwrt.org/releases/21.02.7/packages/x86_64/packages"
+          
+          # 1. 下载主程序 LuCI
+          curl -L -o staging/pkgs/luci-app.ipk "$BASE_URL/luci-app-tailscale_git-21.231.26241-f952028_all.ipk" || echo "App DL Failed"
+          
+          # 2. 下载中文包 (iStoreOS 必备)
+          curl -L -o staging/pkgs/luci-i18n.ipk "$BASE_URL/luci-i18n-tailscale-zh-cn_git-21.231.26241-f952028_all.ipk" || echo "Lang DL Failed"
 
-      - name: Generate Install Script
+      - name: Generate Install Script (Force Extract)
         run: |
-          # 生成安装脚本
           cat << 'EOF' > staging/install.sh
           #!/bin/sh
           
-          echo ">>> 1. Installing Tailscale Binaries..."
+          echo ">>> 1. Installing Core Binaries..."
           cp -f bin/tailscale /usr/sbin/tailscale
           cp -f bin/tailscaled /usr/sbin/tailscaled
           chmod +x /usr/sbin/tailscale /usr/sbin/tailscaled
           
-          echo ">>> 2. Installing LuCI Interface..."
-          if [ -f pkgs/luci-app-tailscale.ipk ]; then
-              # 关键修复：添加 --nodeps 忽略依赖检查，因为我们是手动复制的二进制
-              opkg install pkgs/luci-app-tailscale.ipk --nodeps --force-reinstall
-              
-              # 关键修复：如果安装失败（比如 opkg 报错），尝试强行解压安装
-              if [ $? -ne 0 ]; then
-                  echo "Warning: opkg install failed, trying manual extraction..."
-                  tar xzf pkgs/luci-app-tailscale.ipk -C /tmp/
-                  tar xzf /tmp/data.tar.gz -C /
-                  rm -f /tmp/data.tar.gz /tmp/control.tar.gz /tmp/debian-binary
+          echo ">>> 2. Installing GUI (Force Extract Mode)..."
+          
+          # 函数：暴力解压 IPK，不依赖 opkg
+          install_ipk_manual() {
+              IPK_FILE="$1"
+              if [ -f "$IPK_FILE" ]; then
+                  echo "Extracting $IPK_FILE ..."
+                  # 创建临时目录
+                  mkdir -p /tmp/ts_install_temp
+                  tar xzf "$IPK_FILE" -C /tmp/ts_install_temp
+                  # 解压 data.tar.gz 到根目录
+                  tar xzf /tmp/ts_install_temp/data.tar.gz -C /
+                  # 清理
+                  rm -rf /tmp/ts_install_temp
+              else
+                  echo "Warning: $IPK_FILE not found!"
               fi
-          else
-              echo "Error: LuCI IPK file missing!"
+          }
+          
+          # 执行解压
+          install_ipk_manual "pkgs/luci-app.ipk"
+          install_ipk_manual "pkgs/luci-i18n.ipk"
+          
+          echo ">>> 3. Configuring System..."
+          
+          # 确保配置文件存在
+          if [ ! -f /etc/config/tailscale ]; then
+              touch /etc/config/tailscale
           fi
           
-          echo ">>> 3. Refreshing Menu & Services..."
-          # 关键修复：清除 LuCI 缓存，否则菜单不显示
+          # 确保启动脚本有权限
+          chmod +x /etc/init.d/tailscale
+          
+          # 注册 RPC 服务 (重要：否则菜单不显示)
+          if [ -f /usr/share/rpcd/acl.d/luci-app-tailscale.json ]; then
+             /etc/init.d/rpcd reload
+          fi
+          
+          # 清除 LuCI 缓存 (最重要的一步)
           rm -rf /tmp/luci-indexcache
           rm -rf /tmp/luci-modulecache/
           
-          # 重启相关服务
-          /etc/init.d/rpcd restart
+          # 重启服务
+          /etc/init.d/tailscale enable
+          /etc/init.d/tailscale restart
           
-          # 尝试启用并启动 Tailscale
-          if [ -f /etc/init.d/tailscale ]; then
-              /etc/init.d/tailscale enable
-              /etc/init.d/tailscale restart
-          fi
-          
-          echo "==============================================="
-          echo "   Installation Complete! "
-          echo "   Please refresh your browser page."
-          echo "   Look under 'Network' -> 'Tailscale' or 'VPN'"
-          echo "==============================================="
+          echo "======================================================="
+          echo "✅ 安装完成！"
+          echo "请按 Ctrl+F5 强制刷新浏览器。"
+          echo "入口位置：iStoreOS -> 服务 (Services) -> Tailscale"
+          echo "或者：iStoreOS -> VPN -> Tailscale"
+          echo "======================================================="
           EOF
           
           chmod +x staging/install.sh
@@ -118,14 +132,13 @@ jobs:
       - name: Build .run Package
         run: |
           VERSION=${{ steps.meta.outputs.version }}
-          makeself --notemp staging tailscale-${VERSION}.run "Tailscale ${VERSION} Installer" ./install.sh
+          makeself --notemp staging tailscale-${VERSION}.run "Tailscale ${VERSION} (GUI Fixed)" ./install.sh
 
       - name: Upload Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "v${{ steps.meta.outputs.version }}-fixed"
-          name: "Tailscale v${{ steps.meta.outputs.version }} (GUI Fixed)"
+          tag_name: "v${{ steps.meta.outputs.version }}-gui-fix"
+          name: "Tailscale v${{ steps.meta.outputs.version }} (Force GUI)"
           files: tailscale-${{ steps.meta.outputs.version }}.run
-          draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
