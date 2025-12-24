@@ -1,0 +1,14 @@
+{
+  "luci-app-tailscale": {
+    "description": "Tailscale access",
+    "read": {
+      "uci": [ "tailscale" ]
+    },
+    "write": {
+      "uci": [ "tailscale" ],
+      "file": {
+        "/usr/sbin/tailscale": [ "exec" ]
+      }
+    }
+  }
+}

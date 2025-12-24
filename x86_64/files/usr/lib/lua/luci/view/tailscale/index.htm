@@ -1,0 +1,33 @@
+<h2>Tailscale</h2>
+
+<form method="post">
+  <label>Auth Key</label>
+  <input type="text" name="key" style="width:400px"/><br/><br/>
+
+  <input class="cbi-button cbi-button-apply" type="submit" name="login" value="登录"/>
+  <input class="cbi-button cbi-button-apply" type="submit" name="start" value="启动"/>
+  <input class="cbi-button cbi-button-reset" type="submit" name="stop" value="停止"/>
+</form>
+
+<pre>
+<%=
+luci.sys.exec("tailscale status 2>/dev/null")
+%>
+</pre>
+
+<%
+if luci.http.formvalue("login") then
+  local key = luci.http.formvalue("key")
+  if key and #key > 10 then
+    luci.sys.exec("tailscale up --authkey=" .. key)
+  end
+end
+
+if luci.http.formvalue("start") then
+  luci.sys.exec("/etc/init.d/tailscale start")
+end
+
+if luci.http.formvalue("stop") then
+  luci.sys.exec("/etc/init.d/tailscale stop")
+end
+%>
