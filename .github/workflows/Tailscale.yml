@@ -1,64 +1,130 @@
-name: Build Tailscale Run
+name: Build Tailscale .run Plugin (Official Binaries)
 
 on:
   workflow_dispatch:
+    inputs:
+      # 允许手动指定版本，不填则自动获取最新
+      version:
+        description: 'Tailscale Version (leave empty for latest, e.g., 1.58.2)'
+        required: false
+        default: ''
 
 jobs:
-  build:
-    runs-on: ubuntu-22.04
+  package:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 需要权限上传 Release
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl tar gcc musl-tools makeself
+          sudo apt-get install -y makeself jq curl
 
-      - name: Install Go 1.25.5
+      - name: Determine Version
+        id: meta
         run: |
-          curl -LO https://go.dev/dl/go1.25.5.linux-amd64.tar.gz
-          sudo rm -rf /usr/local/go
-          sudo tar -C /usr/local -xzf go1.25.5.linux-amd64.tar.gz
-          echo "export PATH=/usr/local/go/bin:$PATH" >> $GITHUB_ENV
-          go version
+          if [ -z "${{ inputs.version }}" ]; then
+            # 自动获取 GitHub Latest Release 的 tag，并去掉 'v' 前缀
+            TAG=$(curl -sL https://api.github.com/repos/tailscale/tailscale/releases/latest | jq -r ".tag_name")
+            VERSION=${TAG#v}
+          else
+            VERSION=${{ inputs.version }}
+          fi
+          echo "Target Version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Download Tailscale source
+      - name: Download Official Static Binaries
         run: |
-          mkdir -p tailscale-src
-          curl -L -o tailscale-src/tailscale-1.92.3.tar.gz \
-               https://codeload.github.com/tailscale/tailscale/tar.gz/refs/tags/v1.92.3
-          tar zxvf tailscale-src/tailscale-1.92.3.tar.gz -C tailscale-src --strip-components=1
+          VERSION=${{ steps.meta.outputs.version }}
+          echo "Downloading Tailscale v$VERSION static binaries..."
+          
+          # 直接从 Tailscale 官方下载 amd64 的静态包 (适用于大部分 x86_64 软路由/NAS)
+          # 官方静态包 URL 格式: https://pkgs.tailscale.com/stable/tailscale_1.58.2_amd64.tgz
+          DOWNLOAD_URL="https://pkgs.tailscale.com/stable/tailscale_${VERSION}_amd64.tgz"
+          
+          curl -fSL "$DOWNLOAD_URL" -o tailscale.tgz
+          
+          # 解压
+          tar xzf tailscale.tgz
+          
+          # 整理文件结构
+          mkdir -p staging/bin
+          # 找到解压出的目录（目录名通常包含版本号）
+          EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "tailscale_*_amd64" | head -n 1)
+          
+          # 移动核心文件
+          mv "$EXTRACTED_DIR/tailscale" staging/bin/
+          mv "$EXTRACTED_DIR/tailscaled" staging/bin/
+          
+          # 清理
+          rm -f tailscale.tgz
+          rm -rf "$EXTRACTED_DIR"
 
-      - name: Compile Tailscale x86_64 musl
+      - name: Prepare LuCI App (GUI)
         run: |
-          export PATH=/usr/local/go/bin:$PATH
-          cd tailscale-src
-          CC=musl-gcc GOOS=linux GOARCH=amd64 go build -o tailscaled ./cmd/tailscaled
-          CC=musl-gcc GOOS=linux GOARCH=amd64 go build -o tailscale ./cmd/tailscale
-          mkdir -p x86_64
-          mv tailscaled tailscale x86_64/
+          mkdir -p staging/pkgs
+          
+          # 这里假设您的仓库里有 shell/luci-app-tailscale...ipk
+          # 如果没有，您可以取消下面注释使用 curl 下载通用的第三方包，或者上传到仓库 shell 目录
+          
+          if [ -f "shell/luci-app-tailscale*.ipk" ]; then
+            cp shell/luci-app-tailscale*.ipk staging/pkgs/luci-app-tailscale.ipk
+          else
+            echo "Local LuCI IPK not found, trying to download a generic one..."
+            # 这是一个示例地址，请替换为您信任的 LuCI 插件下载源
+            curl -L -o staging/pkgs/luci-app-tailscale.ipk https://downloads.openwrt.org/releases/packages-23.05/x86_64/packages/luci-app-tailscale_1.1.1-1_all.ipk || echo "Download failed"
+          fi
 
-      - name: Copy LuCI ipk
+      - name: Generate Install Script
         run: |
-          mkdir -p x86_64
-          cp shell/luci-app-tailscale_1.2.6-r19_all.ipk x86_64/
+          # 生成安装脚本，该脚本会被打包进 .run 文件
+          cat << 'EOF' > staging/install.sh
+          #!/bin/sh
+          
+          # 1. 安装核心程序
+          echo ">>> Installing Tailscale Binaries..."
+          cp -f bin/tailscale /usr/sbin/tailscale
+          cp -f bin/tailscaled /usr/sbin/tailscaled
+          chmod +x /usr/sbin/tailscale /usr/sbin/tailscaled
+          
+          # 2. 安装 LuCI 界面 (仅在 OpenWrt 环境)
+          if command -v opkg >/dev/null 2>&1 && [ -f pkgs/luci-app-tailscale.ipk ]; then
+              echo ">>> Installing LuCI Interface..."
+              opkg install pkgs/luci-app-tailscale.ipk --force-reinstall
+          fi
+          
+          # 3. 配置服务启动
+          echo ">>> Configuring Service..."
+          if [ -f /etc/init.d/tailscale ]; then
+              /etc/init.d/tailscale enable
+              /etc/init.d/tailscale restart
+          else
+              # 非 OpenWrt 环境的简单启动逻辑
+              /usr/sbin/tailscaled --cleanup
+              /usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
+          fi
+          
+          echo ">>> Tailscale Installation Complete!"
+          EOF
+          
+          chmod +x staging/install.sh
 
-      - name: Copy install script
-        run: cp shell/install-tailscale.sh x86_64/
-
-      - name: Build .run package
+      - name: Build .run Package
         run: |
-          cd x86_64
-          chmod +x install-tailscale.sh
-          makeself --notemp . ../tailscale-1.92.3.run "Tailscale Installer 1.92.3" ./install-tailscale.sh
+          VERSION=${{ steps.meta.outputs.version }}
+          # 使用 makeself 打包
+          makeself --notemp staging tailscale-${VERSION}.run "Tailscale ${VERSION} Installer" ./install.sh
 
-      - name: Upload .run to release
-        uses: softprops/action-gh-release@v2.1.0
+      - name: Upload Release
+        uses: softprops/action-gh-release@v1
         with:
-          tag_name: "tailscale-1.92.3"
-          name: "tailscale-1.92.3.run"
-          files: tailscale-1.92.3.run
+          tag_name: "v${{ steps.meta.outputs.version }}"
+          name: "Tailscale v${{ steps.meta.outputs.version }} (.run)"
+          files: tailscale-${{ steps.meta.outputs.version }}.run
+          draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
