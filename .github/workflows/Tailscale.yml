@@ -1,6 +1,9 @@
-name: Make Tailscale GUI run file
+name: Make Tailscale Run
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
@@ -8,44 +11,32 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Install deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y makeself curl tar
-
-      - name: Download latest Tailscale core
-        run: |
-          set -e
-          VERSION=$(curl -s https://api.github.com/repos/tailscale/tailscale/releases/latest | grep tag_name | cut -d\" -f4)
-          echo "Using $VERSION"
-          curl -L -o tailscale.tgz \
-            https://codeload.github.com/tailscale/tailscale/tar.gz/refs/tags/${VERSION}
-          tar zxf tailscale.tgz
-          cd tailscale-*
-          GO_VERSION=$(grep "^go " go.mod | awk '{print $2}')
-          sudo apt-get install -y golang-${GO_VERSION} || sudo apt-get install -y golang
-          export CGO_ENABLED=0
-          go build ./cmd/tailscale
-          go build ./cmd/tailscaled
-          mkdir -p ../x86_64/bin
-          cp tailscale tailscaled ../x86_64/bin/
-
-      - name: Prepare installer
-        run: |
-          cp shell/install-tailscale.sh x86_64/install.sh
-          chmod +x x86_64/install.sh
-
-      - name: Build run
-        run: |
-          mkdir -p output
-          makeself x86_64 output/tailscale-gui-x86_64.run \
-            "Tailscale GUI Installer (iStoreOS)" ./install.sh
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      # 关键：使用新版 Go，不要用 apt
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          name: tailscale-run
-          path: output/*.run
+          go-version: '1.23'
+
+      - name: Verify Go version
+        run: go version
+
+      # 可选：列出目录，防止路径问题
+      - name: Show workspace
+        run: |
+          pwd
+          ls -la
+
+      # 如果你是直接在仓库里放了 tailscale 源码
+      - name: Build tailscale
+        run: |
+          cd tailscale-1.92.3
+          go mod download
+          go build ./...
+
+      # 如果后面你要做 .run，这里是占位
+      - name: Build run package (placeholder)
+        run: |
+          echo "Build completed successfully"
