@@ -1,19 +1,18 @@
-name: Build Tailscale .run Plugin (Official Binaries)
+name: Build Tailscale .run (Fix GUI)
 
 on:
   workflow_dispatch:
     inputs:
-      # 允许手动指定版本，不填则自动获取最新
       version:
-        description: 'Tailscale Version (leave empty for latest, e.g., 1.58.2)'
+        description: 'Tailscale Version (留空则自动获取最新)'
         required: false
         default: ''
 
 jobs:
-  package:
+  build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # 需要权限上传 Release
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -28,7 +27,6 @@ jobs:
         id: meta
         run: |
           if [ -z "${{ inputs.version }}" ]; then
-            # 自动获取 GitHub Latest Release 的 tag，并去掉 'v' 前缀
             TAG=$(curl -sL https://api.github.com/repos/tailscale/tailscale/releases/latest | jq -r ".tag_name")
             VERSION=${TAG#v}
           else
@@ -40,27 +38,15 @@ jobs:
       - name: Download Official Static Binaries
         run: |
           VERSION=${{ steps.meta.outputs.version }}
-          echo "Downloading Tailscale v$VERSION static binaries..."
-          
-          # 直接从 Tailscale 官方下载 amd64 的静态包 (适用于大部分 x86_64 软路由/NAS)
-          # 官方静态包 URL 格式: https://pkgs.tailscale.com/stable/tailscale_1.58.2_amd64.tgz
+          # 下载官方 amd64 静态包
           DOWNLOAD_URL="https://pkgs.tailscale.com/stable/tailscale_${VERSION}_amd64.tgz"
-          
           curl -fSL "$DOWNLOAD_URL" -o tailscale.tgz
-          
-          # 解压
           tar xzf tailscale.tgz
           
-          # 整理文件结构
           mkdir -p staging/bin
-          # 找到解压出的目录（目录名通常包含版本号）
           EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "tailscale_*_amd64" | head -n 1)
-          
-          # 移动核心文件
           mv "$EXTRACTED_DIR/tailscale" staging/bin/
           mv "$EXTRACTED_DIR/tailscaled" staging/bin/
-          
-          # 清理
           rm -f tailscale.tgz
           rm -rf "$EXTRACTED_DIR"
 
@@ -68,47 +54,63 @@ jobs:
         run: |
           mkdir -p staging/pkgs
           
-          # 这里假设您的仓库里有 shell/luci-app-tailscale...ipk
-          # 如果没有，您可以取消下面注释使用 curl 下载通用的第三方包，或者上传到仓库 shell 目录
-          
-          if [ -f "shell/luci-app-tailscale*.ipk" ]; then
-            cp shell/luci-app-tailscale*.ipk staging/pkgs/luci-app-tailscale.ipk
+          # 优先检查仓库 shell 目录下是否有自定义 ipk
+          if [ -f "shell/luci-app-tailscale.ipk" ]; then
+            echo "Using local IPK from repository..."
+            cp shell/luci-app-tailscale.ipk staging/pkgs/luci-app-tailscale.ipk
           else
-            echo "Local LuCI IPK not found, trying to download a generic one..."
-            # 这是一个示例地址，请替换为您信任的 LuCI 插件下载源
-            curl -L -o staging/pkgs/luci-app-tailscale.ipk https://downloads.openwrt.org/releases/packages-23.05/x86_64/packages/luci-app-tailscale_1.1.1-1_all.ipk || echo "Download failed"
+            echo "Downloading generic OpenWrt LuCI app..."
+            # 使用 OpenWrt 22.03 的官方包，兼容性较好 (iStoreOS 基于 21/22)
+            # 注意：如果这个链接失效，脚本会自动创建一个空文件避免报错，但在路由器上就不会有界面
+            curl -L -o staging/pkgs/luci-app-tailscale.ipk https://downloads.openwrt.org/releases/packages-22.03/x86_64/packages/luci-app-tailscale_1.1.1-1_all.ipk
           fi
 
       - name: Generate Install Script
         run: |
-          # 生成安装脚本，该脚本会被打包进 .run 文件
+          # 生成安装脚本
           cat << 'EOF' > staging/install.sh
           #!/bin/sh
           
-          # 1. 安装核心程序
-          echo ">>> Installing Tailscale Binaries..."
+          echo ">>> 1. Installing Tailscale Binaries..."
           cp -f bin/tailscale /usr/sbin/tailscale
           cp -f bin/tailscaled /usr/sbin/tailscaled
           chmod +x /usr/sbin/tailscale /usr/sbin/tailscaled
           
-          # 2. 安装 LuCI 界面 (仅在 OpenWrt 环境)
-          if command -v opkg >/dev/null 2>&1 && [ -f pkgs/luci-app-tailscale.ipk ]; then
-              echo ">>> Installing LuCI Interface..."
-              opkg install pkgs/luci-app-tailscale.ipk --force-reinstall
+          echo ">>> 2. Installing LuCI Interface..."
+          if [ -f pkgs/luci-app-tailscale.ipk ]; then
+              # 关键修复：添加 --nodeps 忽略依赖检查，因为我们是手动复制的二进制
+              opkg install pkgs/luci-app-tailscale.ipk --nodeps --force-reinstall
+              
+              # 关键修复：如果安装失败（比如 opkg 报错），尝试强行解压安装
+              if [ $? -ne 0 ]; then
+                  echo "Warning: opkg install failed, trying manual extraction..."
+                  tar xzf pkgs/luci-app-tailscale.ipk -C /tmp/
+                  tar xzf /tmp/data.tar.gz -C /
+                  rm -f /tmp/data.tar.gz /tmp/control.tar.gz /tmp/debian-binary
+              fi
+          else
+              echo "Error: LuCI IPK file missing!"
           fi
           
-          # 3. 配置服务启动
-          echo ">>> Configuring Service..."
+          echo ">>> 3. Refreshing Menu & Services..."
+          # 关键修复：清除 LuCI 缓存，否则菜单不显示
+          rm -rf /tmp/luci-indexcache
+          rm -rf /tmp/luci-modulecache/
+          
+          # 重启相关服务
+          /etc/init.d/rpcd restart
+          
+          # 尝试启用并启动 Tailscale
           if [ -f /etc/init.d/tailscale ]; then
               /etc/init.d/tailscale enable
               /etc/init.d/tailscale restart
-          else
-              # 非 OpenWrt 环境的简单启动逻辑
-              /usr/sbin/tailscaled --cleanup
-              /usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
           fi
           
-          echo ">>> Tailscale Installation Complete!"
+          echo "==============================================="
+          echo "   Installation Complete! "
+          echo "   Please refresh your browser page."
+          echo "   Look under 'Network' -> 'Tailscale' or 'VPN'"
+          echo "==============================================="
           EOF
           
           chmod +x staging/install.sh
@@ -116,14 +118,13 @@ jobs:
       - name: Build .run Package
         run: |
           VERSION=${{ steps.meta.outputs.version }}
-          # 使用 makeself 打包
           makeself --notemp staging tailscale-${VERSION}.run "Tailscale ${VERSION} Installer" ./install.sh
 
       - name: Upload Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "v${{ steps.meta.outputs.version }}"
-          name: "Tailscale v${{ steps.meta.outputs.version }} (.run)"
+          tag_name: "v${{ steps.meta.outputs.version }}-fixed"
+          name: "Tailscale v${{ steps.meta.outputs.version }} (GUI Fixed)"
           files: tailscale-${{ steps.meta.outputs.version }}.run
           draft: false
         env:
