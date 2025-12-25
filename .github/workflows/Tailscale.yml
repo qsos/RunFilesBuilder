@@ -1,140 +1,31 @@
-name: Build Tailscale Advanced Console
+#!/bin/sh
 
-on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: '指定版本 (留空则自动获取最新)'
-        required: false
-        default: ''
+# 停止旧服务
+/etc/init.d/tailscaled stop 2>/dev/null
 
-permissions:
-  contents: write
+# 1. 强行分发二进制文件到双路径 (彻底解决“找不到执行程序”)
+mkdir -p /bin /usr/sbin
+cp -f bin/tailscale /bin/tailscale
+cp -f bin/tailscaled /bin/tailscaled
+cp -f bin/tailscale /usr/sbin/tailscale
+cp -f bin/tailscaled /usr/sbin/tailscaled
+chmod +x /bin/tailscale* /usr/sbin/tailscale*
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+# 2. 安装 UI 界面和 API 脚本 (彻底解决红框“Runtime Error”)
+mkdir -p /usr/lib/lua/luci/controller/
+mkdir -p /usr/lib/lua/luci/view/tailscale_web/
+mkdir -p /www/cgi-bin/
 
-      - name: Prepare Tools
-        run: sudo apt-get update && sudo apt-get install -y makeself jq curl
+cp -f usr/lib/lua/luci/controller/tailscale_web.lua /usr/lib/lua/luci/controller/
+cp -rf usr/lib/lua/luci/view/tailscale_web/* /usr/lib/lua/luci/view/tailscale_web/
+cp -f www/cgi-bin/tailscale_api /www/cgi-bin/
+chmod 755 /www/cgi-bin/tailscale_api
 
-      - name: Get Version
-        id: v
-        run: |
-          if [ -z "${{ github.event.inputs.version }}" ]; then
-            VERSION=$(curl -sL https://api.github.com/repos/tailscale/tailscale/releases/latest | jq -r ".tag_name" | sed 's/v//')
-          else
-            VERSION=${{ github.event.inputs.version }}
-          fi
-          echo "tag=$VERSION" >> $GITHUB_OUTPUT
+# 3. 核心：强制清理 LuCI 编译缓存
+rm -rf /tmp/luci-indexcache /tmp/luci-modulecache
 
-      - name: Download Binary
-        run: |
-          VER=${{ steps.v.outputs.tag }}
-          curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${VER}_amd64.tgz" -o ts.tgz
-          tar xzf ts.tgz
-          mkdir -p staging/bin staging/usr/lib/lua/luci/controller/ staging/usr/lib/lua/luci/view/tailscale_web/ staging/www/cgi-bin/
-          mv tailscale_*/tailscale staging/bin/
-          mv tailscale_*/tailscaled staging/bin/
-          rm -rf ts.tgz tailscale_*
+# 4. 启动服务
+/etc/init.d/tailscaled enable
+/etc/init.d/tailscaled start
 
-      - name: Create Backend API
-        run: |
-          cat << 'EOF' > staging/www/cgi-bin/tailscale_api
-          #!/bin/sh
-          echo "Content-type: application/json"
-          echo ""
-          [ -f "/bin/tailscale" ] && TS="/bin/tailscale" || TS="/usr/sbin/tailscale"
-          case "$QUERY_STRING" in
-              *action=status*)
-                  ST=$($TS status --json 2>/dev/null)
-                  if [ $? -ne 0 ] || [ -z "$ST" ]; then 
-                      echo "{\"active\": \"未运行\", \"ip\": \"-\", \"devices\": []}"
-                  else
-                      IP=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0] // "-"')
-                      DEVICES=$(echo "$ST" | jq -c '.Peer | to_entries | map({hostname: .value.HostName, ip: (.value.TailscaleIPs[0] // "-"), os: (.value.OS // "-"), version: (.value.Version // "-"), online: .value.Online})')
-                      echo "{\"active\": \"运行中\", \"ip\": \"$IP\", \"devices\": $DEVICES}"
-                  fi ;;
-              *action=login*) $TS up --accept-dns=false --reset >/dev/null 2>&1 & echo "{\"result\": \"ok\"}" ;;
-              *action=logout*) $TS logout >/dev/null 2>&1; echo "{\"result\": \"ok\"}" ;;
-          esac
-          EOF
-          chmod 755 staging/www/cgi-bin/tailscale_api
-
-      - name: Create UI (极致精简)
-        run: |
-          cat << 'EOF' > staging/usr/lib/lua/luci/view/tailscale_web/index.htm
-          <%+header%>
-          <div class="cbi-map">
-              <h2 style="margin-bottom:20px">Tailscale 控制面板</h2>
-              <div style="background:#fff; padding:15px; border:1px solid #ddd; border-radius:4px; margin-bottom:20px; display:flex; justify-content:space-between; align-items:center;">
-                  <div><strong>服务状态:</strong> <span id="st-txt">连接中...</span><br><small id="ip-txt" style="color:#888">地址: -</small></div>
-                  <div>
-                      <button class="cbi-button cbi-button-apply" onclick="doAct('login')">登录</button>
-                      <button class="cbi-button cbi-button-reset" onclick="doAct('logout')">注销</button>
-                  </div>
-              </div>
-              <table class="cbi-section-table" style="width:100%; table-layout:fixed;">
-                  <tr class="cbi-section-table-titles">
-                      <th class="cbi-section-table-cell" style="text-align:left;">设备名称</th>
-                      <th class="cbi-section-table-cell" style="text-align:left;">内网 IP</th>
-                      <th class="cbi-section-table-cell" style="text-align:left;">版本/系统</th>
-                      <th class="cbi-section-table-cell" style="text-align:left;">状态</th>
-                  </tr>
-                  <tbody id="dev-list"></tbody>
-              </table>
-          </div>
-          <script>
-              function refresh() {
-                  fetch('/cgi-bin/tailscale_api?action=status').then(r => r.json()).then(d => {
-                      const st = document.getElementById('st-txt');
-                      st.innerText = d.active;
-                      st.style.color = (d.active === "运行中") ? "green" : "red";
-                      document.getElementById('ip-txt').innerText = "地址: " + (d.ip || "-");
-                      let h = '';
-                      if(d.devices && d.devices.length > 0) {
-                          d.devices.forEach(v => {
-                              h += `<tr class="cbi-section-table-row">
-                                  <td><strong>${v.hostname}</strong></td>
-                                  <td><code>${v.ip}</code></td>
-                                  <td><small>${v.version}<br>${v.os}</small></td>
-                                  <td>${v.online ? '<span style="color:green">● 在线</span>' : '<span style="color:#999">○ 离线</span>'}</td>
-                              </tr>`;
-                          });
-                      } else { h = '<tr><td colspan="4" style="text-align:center;padding:20px;">无节点</td></tr>'; }
-                      document.getElementById('dev-list').innerHTML = h;
-                  });
-              }
-              function doAct(a) { fetch('/cgi-bin/tailscale_api?action='+a); setTimeout(refresh, 2000); }
-              refresh(); setInterval(refresh, 8000);
-          </script>
-          <%+footer%>
-          EOF
-
-      - name: Create Controller
-        run: |
-          cat << 'EOF' > staging/usr/lib/lua/luci/controller/tailscale_web.lua
-          module("luci.controller.tailscale_web", package.seeall)
-          function index()
-              entry({"admin", "services", "tailscale_web"}, template("tailscale_web/index"), _("Tailscale"), 99)
-          end
-          EOF
-
-      - name: Build Package
-        run: |
-          # 核心修正：使用你指定的 install-tailscale.sh
-          cp shell/install-tailscale.sh staging/install.sh
-          chmod +x staging/install.sh
-          makeself --notemp staging "tailscale-${{ steps.v.outputs.tag }}-x86.run" "Tailscale" ./install.sh
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: "v${{ steps.v.outputs.tag }}"
-          name: "Tailscale-Console-v${{ steps.v.outputs.tag }}"
-          files: "*.run"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+echo "Tailscale 控制面板安装成功！请 F5 刷新网页。"
