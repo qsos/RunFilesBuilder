@@ -36,31 +36,35 @@ jobs:
           VER=${{ steps.v.outputs.tag }}
           curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${VER}_amd64.tgz" -o ts.tgz
           tar xzf ts.tgz
-          mkdir -p staging/bin staging/usr/lib/lua/luci/controller/ staging/usr/lib/lua/luci/view/tailscale_web/ staging/www/cgi-bin/
-          # 统一将二进制放入 /bin 目录，这是 iStoreOS 最稳妥的位置
-          mv tailscale_*/tailscale staging/bin/
-          mv tailscale_*/tailscaled staging/bin/
+          # 创建所有可能的 bin 目录以防万一
+          mkdir -p staging/bin staging/usr/sbin/ staging/usr/lib/lua/luci/controller/ staging/usr/lib/lua/luci/view/tailscale_web/ staging/www/cgi-bin/
+          # 同时放入两个地方，双重保险
+          cp tailscale_*/tailscale staging/bin/
+          cp tailscale_*/tailscaled staging/bin/
+          cp tailscale_*/tailscale staging/usr/sbin/
+          cp tailscale_*/tailscaled staging/usr/sbin/
           rm -rf ts.tgz tailscale_*
 
-      - name: Create Backend API (强化路径检查)
+      - name: Create Backend API (支持自动路径搜索)
         run: |
           cat << 'EOF' > staging/www/cgi-bin/tailscale_api
           #!/bin/sh
           echo "Content-type: application/json"
           echo ""
           
-          # 使用绝对路径，确保 API 永远能找到程序
-          TS_BIN="/bin/tailscale"
+          # 自动寻找执行程序路径
+          if [ -f "/bin/tailscale" ]; then TS_BIN="/bin/tailscale"
+          elif [ -f "/usr/sbin/tailscale" ]; then TS_BIN="/usr/sbin/tailscale"
+          else
+              echo "{\"active\": \"找不到执行程序\", \"debug\": \"检查 /bin 和 /usr/sbin\"}"
+              exit 0
+          fi
 
           case "$QUERY_STRING" in
               *action=status*)
-                  if [ ! -f "$TS_BIN" ]; then
-                      echo "{\"active\": \"找不到执行程序\"}"
-                      exit 0
-                  fi
                   ST=$($TS_BIN status --json 2>/dev/null)
                   if [ $? -ne 0 ] || [ -z "$ST" ]; then 
-                      echo "{\"active\": \"未运行\"}"
+                      echo "{\"active\": \"未运行\", \"ip\": \"-\", \"devices\": []}"
                   else
                       IP=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0] // "-"')
                       DEVICES=$(echo "$ST" | jq -c '.Peer | to_entries | map({hostname: .value.HostName, ip: (.value.TailscaleIPs[0] // "-"), os: (.value.OS // "-"), version: (.value.Version // "-"), online: .value.Online})')
@@ -76,7 +80,7 @@ jobs:
           EOF
           chmod 755 staging/www/cgi-bin/tailscale_api
 
-      - name: Create UI (简约、无冗余、强兼容)
+      - name: Create UI (极致精简版，无冗余)
         run: |
           cat << 'EOF' > staging/usr/lib/lua/luci/view/tailscale_web/index.htm
           <%+header%>
@@ -98,10 +102,10 @@ jobs:
                   <table class="cbi-section-table" style="width:100%; table-layout:fixed; border:1px solid #eee;">
                       <thead>
                           <tr class="cbi-section-table-titles">
-                              <th class="cbi-section-table-cell" style="width:35%; text-align:left; padding:10px;">设备</th>
-                              <th class="cbi-section-table-cell" style="width:25%; text-align:left; padding:10px;">IP 地址</th>
+                              <th class="cbi-section-table-cell" style="width:40%; text-align:left; padding:10px;">设备</th>
+                              <th class="cbi-section-table-cell" style="width:25%; text-align:left; padding:10px;">内网 IP</th>
                               <th class="cbi-section-table-cell" style="width:20%; text-align:left; padding:10px;">版本/系统</th>
-                              <th class="cbi-section-table-cell" style="width:20%; text-align:left; padding:10px;">状态</th>
+                              <th class="cbi-section-table-cell" style="width:15%; text-align:left; padding:10px;">状态</th>
                           </tr>
                       </thead>
                       <tbody id="dev-list"></tbody>
@@ -113,7 +117,7 @@ jobs:
               function refresh() {
                   fetch('/cgi-bin/tailscale_api?action=status').then(r => r.json()).then(d => {
                       const st = document.getElementById('st-txt');
-                      st.innerText = d.active || "未知错误";
+                      st.innerText = d.active;
                       st.style.color = (d.active === "运行中") ? "#28a745" : "#ff4d4f";
                       document.getElementById('ip-txt').innerText = "地址: " + (d.ip || "-");
 
@@ -122,7 +126,7 @@ jobs:
                       if(d.devices && d.devices.length > 0) {
                           d.devices.forEach(dev => {
                               list.innerHTML += `<tr class="cbi-section-table-row">
-                                  <td style="padding:10px;"><strong>${dev.hostname}</strong></td>
+                                  <td style="padding:10px; overflow:hidden; text-overflow:ellipsis;"><strong>${dev.hostname}</strong></td>
                                   <td style="padding:10px;"><code>${dev.ip}</code></td>
                                   <td style="padding:10px; font-size:11px;">${dev.version}<br>${dev.os}</td>
                                   <td style="padding:10px;">${dev.online ? '<span style="color:#28a745">● 在线</span>' : '<span style="color:#999">○ 离线</span>'}</td>
@@ -131,11 +135,14 @@ jobs:
                       } else {
                           list.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:20px; color:#999">未发现网络节点</td></tr>';
                       }
-                  }).catch(() => {
-                      document.getElementById('st-txt').innerText = "API 路径错误 (请重启路由)";
                   });
               }
-              function doAct(a) { fetch('/cgi-bin/tailscale_api?action=' + a); setTimeout(refresh, 2000); }
+              function doAct(a) { 
+                  const btn = event.target; btn.disabled = true;
+                  fetch('/cgi-bin/tailscale_api?action=' + a).then(() => {
+                      setTimeout(() => { btn.disabled = false; refresh(); }, 3000);
+                  }); 
+              }
               refresh(); setInterval(refresh, 8000);
           </script>
           <%+footer%>
@@ -156,7 +163,7 @@ jobs:
           chmod +x staging/install.sh
           makeself --notemp staging "tailscale-${{ steps.v.outputs.tag }}-x86.run" "Tailscale" ./install.sh
 
-      - name: Create Release (PassWall 风格命名)
+      - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "v${{ steps.v.outputs.tag }}"
