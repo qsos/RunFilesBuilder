@@ -30,11 +30,11 @@ jobs:
           cd tailscale-1.92.3
           make
 
-      # Step 5: Package into a .run file
+      # Step 5: Package into a .run file (recursively copy all files and directories)
       - name: Package Tailscale into .run file
         run: |
           mkdir -p output
-          cp tailscale tailscaled tailscale-1.92.3/* ./tailscale-1.92.3
+          cp tailscale tailscaled ./tailscale-1.92.3/* ./tailscale-1.92.3/
           makeself ./tailscale-1.92.3 output/tailscale-1.92.3.run "Tailscale Installer v1.92.3" ./install-tailscale.sh
 
       # Step 6: Upload .run file to GitHub Release
