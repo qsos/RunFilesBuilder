@@ -1,30 +1,25 @@
 #!/bin/sh
 
-echo ">>> 开始安装 Tailscale 控制台版..."
+# 1. 安装 jq 依赖（用于解析 Tailscale 状态）
+opkg update && opkg install jq
 
-# 1. 检查并安装核心依赖 jq
-if ! command -v jq >/dev/null 2>&1; then
-    echo "正在安装 jq 依赖..."
-    opkg update && opkg install jq
-fi
-
-# 2. 安装二进制程序
+# 2. 安装文件
 cp -f bin/tailscale /usr/sbin/tailscale
 cp -f bin/tailscaled /usr/sbin/tailscaled
 chmod +x /usr/sbin/tailscale /usr/sbin/tailscaled
 
 # 3. 安装 LuCI 界面
-mkdir -p /usr/lib/lua/luci/controller/
-mkdir -p /usr/lib/lua/luci/view/tailscale_web/
+mkdir -p /usr/lib/lua/luci/controller/ /usr/lib/lua/luci/view/tailscale_web/
 cp -f usr/lib/lua/luci/controller/tailscale_web.lua /usr/lib/lua/luci/controller/
 cp -f usr/lib/lua/luci/view/tailscale_web/index.htm /usr/lib/lua/luci/view/tailscale_web/
 
-# 4. 安装后端 API 并强制设置权限
+# 4. 设置后端 API
 mkdir -p /www/cgi-bin
 cp -f www/cgi-bin/tailscale_api /www/cgi-bin/tailscale_api
 chmod 755 /www/cgi-bin/tailscale_api
 
-# 5. 配置并启动后台守护进程
+# 5. 启动服务逻辑
+/etc/init.d/tailscale stop 2>/dev/null
 cat << 'EOF' > /etc/init.d/tailscale
 #!/bin/sh /etc/rc.common
 START=99
@@ -41,11 +36,5 @@ chmod +x /etc/init.d/tailscale
 /etc/init.d/tailscale enable
 /etc/init.d/tailscale restart
 
-# 6. 刷新页面缓存
 rm -rf /tmp/luci-indexcache /tmp/luci-modulecache/
-
-echo "-------------------------------------------------------"
-echo "✅ 安装成功！"
-echo "请刷新 OpenWrt 页面，在 [服务] 菜单中进入 [Tailscale Console]。"
-echo "如果界面加载缓慢，请按 Ctrl+F5 强制刷新。"
-echo "-------------------------------------------------------"
+echo "安装完成，iStoreOS 风格面板已就绪。"
