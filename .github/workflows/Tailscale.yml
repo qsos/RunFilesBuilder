@@ -1,39 +1,87 @@
-#!/bin/sh
+name: Build Tailscale Console
 
-# 1. 安装二进制文件
-cp -f bin/tailscale /usr/sbin/tailscale
-cp -f bin/tailscaled /usr/sbin/tailscaled
-chmod +x /usr/sbin/tailscale /usr/sbin/tailscaled
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
 
-# 2. 安装 LuCI 界面文件 (菜单和 HTML)
-mkdir -p /usr/lib/lua/luci/controller/
-mkdir -p /usr/lib/lua/luci/view/tailscale_web/
-cp -f usr/lib/lua/luci/controller/tailscale_web.lua /usr/lib/lua/luci/controller/
-cp -f usr/lib/lua/luci/view/tailscale_web/index.htm /usr/lib/lua/luci/view/tailscale_web/
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            output_name: x86
+          - arch: arm64
+            output_name: arm64
 
-# 3. 安装后端 API (这是解决“死界面”的关键)
-mkdir -p /www/cgi-bin
-# 这里的路径必须和 .yml 打包时的路径对应
-cp -f www/cgi-bin/tailscale_api /www/cgi-bin/tailscale_api
-chmod 755 /www/cgi-bin/tailscale_api
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-# 4. 确保 tailscaled 核心服务在后台运行
-cat << 'EOF' > /etc/init.d/tailscale
-#!/bin/sh /etc/rc.common
-START=99
-USE_PROCD=1
-start_service() {
-    mkdir -p /etc/tailscale
-    procd_open_instance
-    procd_set_param command /usr/sbin/tailscaled --state=/etc/tailscale/tailscaled.state
-    procd_set_param respawn
-    procd_close_instance
-}
-EOF
-chmod +x /etc/init.d/tailscale
-/etc/init.d/tailscale enable
-/etc/init.d/tailscale restart
+      - name: Prepare Tools
+        run: sudo apt-get update && sudo apt-get install -y makeself jq curl
 
-# 5. 清理 LuCI 缓存
-rm -rf /tmp/luci-indexcache /tmp/luci-modulecache/
-echo "安装完成！"
+      - name: Download and Prepare Staging
+        id: meta
+        run: |
+          VERSION=$(curl -sL https://api.github.com/repos/tailscale/tailscale/releases/latest | jq -r ".tag_name" | sed 's/v//')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${VERSION}_${{ matrix.arch }}.tgz" -o tailscale.tgz
+          tar xzf tailscale.tgz
+          mkdir -p staging/bin staging/usr/lib/lua/luci/controller/ staging/usr/lib/lua/luci/view/tailscale_web/ staging/www/cgi-bin/
+          mv tailscale_*/tailscale staging/bin/
+          mv tailscale_*/tailscaled staging/bin/
+
+      - name: Create Backend API
+        run: |
+          cat << 'EOF' > staging/www/cgi-bin/tailscale_api
+          #!/bin/sh
+          echo "Content-type: application/json"
+          echo ""
+          case "$QUERY_STRING" in
+              *action=status*)
+                  ST=$(/usr/sbin/tailscale status --json 2>/dev/null)
+                  if [ $? -ne 0 ]; then
+                      echo "{\"active\": \"未启动\", \"ip\": \"-\"}"
+                  else
+                      BACKEND=$(echo "$ST" | jq -r '.BackendState')
+                      IP=$(echo "$ST" | jq -r '.TailscaleIPs[0] // "-"')
+                      AUTH=$(echo "$ST" | jq -r '.AuthURL // ""')
+                      echo "{\"active\": \"$BACKEND\", \"ip\": \"$IP\", \"url\": \"$AUTH\"}"
+                  fi
+                  ;;
+              *action=login*)
+                  /usr/sbin/tailscale up --accept-dns=false >/dev/null 2>&1 &
+                  echo "{\"result\": \"success\"}"
+                  ;;
+              *action=logout*)
+                  /usr/sbin/tailscale logout >/dev/null 2>&1
+                  echo "{\"result\": \"success\"}"
+                  ;;
+          esac
+          EOF
+          chmod +x staging/www/cgi-bin/tailscale_api
+
+      - name: Create Console UI
+        run: |
+          cat << 'EOF' > staging/usr/lib/lua/luci/view/tailscale_web/index.htm
+          <%+header%>
+          <div class="cbi-map">
+              <h2 name="content">Tailscale 交互控制台</h2>
+              <fieldset class="cbi-section">
+                  <div style="padding:20px; background:#f9f9f9; border-radius:8px; border:1px solid #ddd;">
+                      <p>节点状态: <b id="ts-status" style="color:orange;">获取中...</b></p>
+                      <p>内网地址: <b id="ts-ip">-</b></p>
+                      <hr/>
+                      <div style="margin-top:15px;">
+                          <button class="cbi-button cbi-button-apply important" onclick="doAct('login')">一键上线</button>
+                          <button class="cbi-button cbi-button-reset" onclick="doAct('logout')">注销退出</button>
+                      </div>
+                      <div id="login-box" style="display:none; margin-top:15px; background:#fffbe6; padding:10px; border:1px solid #ffe58f;">
+                          <p>需要授权，请点击链接登录：</p>
+                          <a id="ts-url" href="#" target="_blank" style="color:#
