@@ -43,16 +43,86 @@ jobs:
 
       - name: Create Backend API
         run: |
-          printf '#!/bin/sh\necho "Content-type: application/json"\necho ""\n[ -f "/bin/tailscale" ] && TS="/bin/tailscale" || TS="/usr/sbin/tailscale"\ncase "$QUERY_STRING" in\n  *action=status*) ST=$($TS status --json 2>/dev/null); if [ $? -ne 0 ] || [ -z "$ST" ]; then echo "{\\"active\\": \\"未运行\\", \\"ip\\": \\"-\\", \\"devices\\": []}"; else IP=$(echo "$ST" | jq -r ".Self.TailscaleIPs[0] // \\"-\\""); DEVICES=$(echo "$ST" | jq -c ".Peer | to_entries | map({hostname: .value.HostName, ip: (.value.TailscaleIPs[0] // \\"-\\"), os: (.value.OS // \\"-\\"), version: (.value.Version // \\"-\\"), online: .value.Online})"); echo "{\\"active\\": \\"运行中\\", \\"ip\\": \\"$IP\\", \\"devices\\": $DEVICES}"; fi ;;\n  *action=login*) $TS up --accept-dns=false --reset >/dev/null 2>&1 & echo "{\\"result\\": \\"ok\\"}";;\n  *action=logout*) $TS logout >/dev/null 2>&1; echo "{\\"result\\": \\"ok\\"}";;\nesac\n' > staging/www/cgi-bin/tailscale_api
+          cat << 'EOF' > staging/www/cgi-bin/tailscale_api
+          #!/bin/sh
+          echo "Content-type: application/json"
+          echo ""
+          [ -f "/bin/tailscale" ] && TS="/bin/tailscale" || TS="/usr/sbin/tailscale"
+          case "$QUERY_STRING" in
+              *action=status*)
+                  ST=$($TS status --json 2>/dev/null)
+                  if [ $? -ne 0 ] || [ -z "$ST" ]; then 
+                      echo "{\"active\": \"未运行\", \"ip\": \"-\", \"devices\": []}"
+                  else
+                      IP=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0] // "-"')
+                      DEVICES=$(echo "$ST" | jq -c '.Peer | to_entries | map({hostname: .value.HostName, ip: (.value.TailscaleIPs[0] // "-"), os: (.value.OS // "-"), version: (.value.Version // "-"), online: .value.Online})')
+                      echo "{\"active\": \"运行中\", \"ip\": \"$IP\", \"devices\": $DEVICES}"
+                  fi ;;
+              *action=login*) $TS up --accept-dns=false --reset >/dev/null 2>&1 & echo "{\"result\": \"ok\"}" ;;
+              *action=logout*) $TS logout >/dev/null 2>&1; echo "{\"result\": \"ok\"}" ;;
+          esac
+          EOF
           chmod 755 staging/www/cgi-bin/tailscale_api
 
-      - name: Create UI
+      - name: Create UI (极致精简版)
         run: |
-          printf '<%%+header%%>\n<div class="cbi-map">\n  <h2 style="margin-bottom:20px">Tailscale 控制面板</h2>\n  <div style="background:#fff; padding:15px; border:1px solid #ddd; border-radius:4px; margin-bottom:20px; display:flex; justify-content:space-between; align-items:center;">\n    <div><strong>状态:</strong> <span id="st-txt">连接中...</span><br><small id="ip-txt" style="color:#888">地址: -</small></div>\n    <div><button class="cbi-button cbi-button-apply" onclick="doAct(\'login\')">登录</button> <button class="cbi-button cbi-button-reset" onclick="doAct(\'logout\')">注销</button></div>\n  </div>\n  <table class="cbi-section-table" style="width:100%%; table-layout:fixed; border:1px solid #eee;">\n    <thead><tr class="cbi-section-table-titles"><th class="cbi-section-table-cell" style="width:40%%; text-align:left; padding:10px;">设备名称</th><th class="cbi-section-table-cell" style="width:25%%; text-align:left; padding:10px;">内网 IP</th><th class="cbi-section-table-cell" style="width:20%%; text-align:left; padding:10px;">系统/版本</th><th class="cbi-section-table-cell" style="width:15%%; text-align:left; padding:10px;">状态</th></tr></thead>\n    <tbody id="dev-list"></tbody>\n  </table>\n</div>\n<script>\nfunction refresh() { fetch("/cgi-bin/tailscale_api?action=status").then(r => r.json()).then(d => {\n  const st = document.getElementById("st-txt"); st.innerText = d.active; st.style.color = (d.active === "运行中") ? "#28a745" : "#ff4d4f";\n  document.getElementById("ip-txt").innerText = "地址: " + (d.ip || "-");\n  let h = ""; if(d.devices && d.devices.length > 0) {\n    d.devices.forEach(v => { h += `<tr class="cbi-section-table-row"><td style="padding:10px;"><strong>${v.hostname}</strong></td><td style="padding:10px;"><code>${v.ip}</code></td><td style="padding:10px; font-size:11px;">${v.version}<br>${v.os}</td><td style="padding:10px;">${v.online ? \'<span style="color:#28a745">● 在线</span>\' : \'<span style="color:#999">○ 离线</span>\'}</td></tr>`; });\n  } else { h = "<tr><td colspan=\'4\' style=\'text-align:center;padding:20px;color:#999;\'>未发现节点</td></tr>"; } document.getElementById("dev-list").innerHTML = h;\n}); } function doAct(a) { fetch("/cgi-bin/tailscale_api?action="+a); setTimeout(refresh, 2000); }\nrefresh(); setInterval(refresh, 8000);\n</script>\n<%%+footer%%>\n' > staging/usr/lib/lua/luci/view/tailscale_web/index.htm
+          cat << 'EOF' > staging/usr/lib/lua/luci/view/tailscale_web/index.htm
+          <%+header%>
+          <div class="cbi-map">
+              <h2 style="margin-bottom:20px">Tailscale 控制面板</h2>
+              <div style="background:#fff; padding:15px; border:1px solid #ddd; border-radius:4px; margin-bottom:20px; display:flex; justify-content:space-between; align-items:center;">
+                  <div><strong>状态:</strong> <span id="st-txt">连接中...</span><br><small id="ip-txt" style="color:#888">地址: -</small></div>
+                  <div>
+                      <button class="cbi-button cbi-button-apply" onclick="doAct('login')">登录</button>
+                      <button class="cbi-button cbi-button-reset" onclick="doAct('logout')">注销</button>
+                  </div>
+              </div>
+              <table class="cbi-section-table" style="width:100%; table-layout:fixed; border:1px solid #eee;">
+                  <thead>
+                      <tr class="cbi-section-table-titles">
+                          <th class="cbi-section-table-cell" style="width:40%; text-align:left; padding:10px;">设备名称</th>
+                          <th class="cbi-section-table-cell" style="width:25%; text-align:left; padding:10px;">内网 IP</th>
+                          <th class="cbi-section-table-cell" style="width:20%; text-align:left; padding:10px;">系统/版本</th>
+                          <th class="cbi-section-table-cell" style="width:15%; text-align:left; padding:10px;">状态</th>
+                      </tr>
+                  </thead>
+                  <tbody id="dev-list"></tbody>
+              </table>
+          </div>
+          <script>
+              function refresh() {
+                  fetch('/cgi-bin/tailscale_api?action=status').then(r => r.json()).then(d => {
+                      document.getElementById('st-txt').innerText = d.active;
+                      document.getElementById('st-txt').style.color = (d.active === "运行中") ? "#28a745" : "#ff4d4f";
+                      document.getElementById('ip-txt').innerText = "地址: " + (d.ip || "-");
+                      let h = '';
+                      if(d.devices && d.devices.length > 0) {
+                          d.devices.forEach(v => {
+                              h += '<tr class="cbi-section-table-row">' +
+                                   '<td style="padding:10px;"><strong>' + v.hostname + '</strong></td>' +
+                                   '<td style="padding:10px;"><code>' + v.ip + '</code></td>' +
+                                   '<td style="padding:10px; font-size:11px;">' + v.version + '<br>' + v.os + '</td>' +
+                                   '<td style="padding:10px;">' + (v.online ? '<span style="color:#28a745">● 在线</span>' : '<span style="color:#999">○ 离线</span>') + '</td>' +
+                                   '</tr>';
+                          });
+                      } else { h = '<tr><td colspan="4" style="text-align:center;padding:20px;color:#999;">未发现节点</td></tr>'; }
+                      document.getElementById('dev-list').innerHTML = h;
+                  });
+              }
+              function doAct(a) { fetch('/cgi-bin/tailscale_api?action='+a); setTimeout(refresh, 2000); }
+              refresh(); setInterval(refresh, 8000);
+          </script>
+          <%+footer%>
+          EOF
 
       - name: Create Controller
         run: |
-          printf 'module("luci.controller.tailscale_web", package.seeall)\nfunction index()\n  entry({"admin", "services", "tailscale_web"}, template("tailscale_web/index"), _("Tailscale"), 99)\nend\n' > staging/usr/lib/lua/luci/controller/tailscale_web.lua
+          cat << 'EOF' > staging/usr/lib/lua/luci/controller/tailscale_web.lua
+          module("luci.controller.tailscale_web", package.seeall)
+          function index()
+              entry({"admin", "services", "tailscale_web"}, template("tailscale_web/index"), _("Tailscale"), 99)
+          end
+          EOF
 
       - name: Build Package
         run: |
