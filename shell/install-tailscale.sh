@@ -14,13 +14,10 @@ cp -f www/cgi-bin/tailscale_api /www/cgi-bin/
 cp -f usr/lib/lua/luci/controller/tailscale_web.lua /usr/lib/lua/luci/controller/
 cp -f usr/lib/lua/luci/view/tailscale_web/index.htm /usr/lib/lua/luci/view/tailscale_web/
 
-# 3. 核心修复：确保所有执行权限到位，防止 404/403
-chmod 755 /www/cgi-bin/tailscale_api
-chmod 755 /bin/tailscale*
-chmod 755 /usr/sbin/tailscale*
-chmod -R 755 /usr/lib/lua/luci/view/tailscale_web
+# 3. 授予执行权限
+chmod +x /bin/tailscale* /usr/sbin/tailscale* /www/cgi-bin/tailscale_api
 
-# 4. 写入自启动脚本 (保持你的原始逻辑)
+# 4. 核心修复：服务自启动脚本
 cat << 'EOF' > /etc/init.d/tailscaled
 #!/bin/sh /etc/rc.common
 START=99
@@ -34,11 +31,11 @@ start_service() {
 EOF
 chmod +x /etc/init.d/tailscaled
 
-# 5. 立即激活并启动
+# 5. 激活并启动
 /etc/init.d/tailscaled enable
 /etc/init.d/tailscaled start
 
-# 6. 【精准修复 404】重启 Web 服务并强刷 LuCI 缓存
+# 6. 【解决 404 关键】重启网页服务器并清理缓存
 /etc/init.d/uhttpd restart
 rm -rf /tmp/luci-indexcache /tmp/luci-modulecache/*
 
