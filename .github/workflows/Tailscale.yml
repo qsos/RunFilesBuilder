@@ -1,46 +1,47 @@
-name: Build Tailscale run package
+name: Build and Install Tailscale
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-tailscale:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      # Step 1: Checkout the repository
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-      - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y curl tar makeself
-
-      - name: Prepare directories
+      # Step 2: Install necessary dependencies
+      - name: Install build dependencies
         run: |
-          mkdir -p x86_64
-          chmod +x shell/install-tailscale.sh
-          cp shell/install-tailscale.sh x86_64/install.sh
+          sudo apt-get update
+          sudo apt-get install -y curl make gcc g++ git
 
-      - name: Download Tailscale core (amd64)
+      # Step 3: Download and extract Tailscale source code
+      - name: Download Tailscale
         run: |
-          curl -L https://pkgs.tailscale.com/stable/tailscale_1.92.3_amd64.tgz -o tailscale.tgz
-          tar xf tailscale.tgz
+          curl -L https://github.com/tailscale/tailscale/archive/refs/tags/v1.92.3.tar.gz -o tailscale-1.92.3.tar.gz
+          tar -xzf tailscale-1.92.3.tar.gz
 
-          REAL_DIR=$(tar tf tailscale.tgz | head -n1 | cut -d/ -f1)
+      # Step 4: Build Tailscale
+      - name: Build Tailscale
+        run: |
+          cd tailscale-1.92.3
+          make
 
-          cp "$REAL_DIR/tailscale" x86_64/
-          cp "$REAL_DIR/tailscaled" x86_64/
-          chmod +x x86_64/tailscale x86_64/tailscaled
-
-      - name: Build run file
+      # Step 5: Package into a .run file
+      - name: Package Tailscale into .run file
         run: |
           mkdir -p output
-          makeself x86_64 \
-            output/tailscale-1.92.3_x86_64.run \
-            "Tailscale 1.92.3 x86_64 Installer" \
-            ./install.sh
+          makeself ./tailscale-1.92.3 output/tailscale-1.92.3.run "Tailscale Installer v1.92.3" ./install.sh
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      # Step 6: Upload .run file to GitHub Release
+      - name: Upload .run file to release
+        uses: softprops/action-gh-release@v2.1.0
         with:
-          name: tailscale-run
-          path: output/*.run
+          tag_name: "v1.92.3"
+          name: "Tailscale v1.92.3"
+          files: output/*.run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
