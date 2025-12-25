@@ -7,6 +7,9 @@ on:
         description: 'Tailscale Version (留空自动最新)'
         required: false
         default: ''
+  push:
+    branches:
+      - main
 
 jobs:
   build:
@@ -14,18 +17,14 @@ jobs:
     permissions:
       contents: write
     
-    # 定义矩阵策略：同时构建 x86 和 arm64
     strategy:
       fail-fast: false
       matrix:
         include:
-          # --- x86 任务配置 ---
-          - arch: amd64             # 官方下载用的架构名
-            output_name: x86        # 最终文件名显示名称
-            
-          # --- ARM64 任务配置 ---
-          - arch: arm64             # 官方下载用的架构名
-            output_name: arm64      # 最终文件名显示名称
+          - arch: amd64
+            output_name: x86
+          - arch: arm64
+            output_name: arm64
 
     steps:
       - name: Checkout repository
@@ -45,143 +44,69 @@ jobs:
           else
             VERSION=${{ inputs.version }}
           fi
-          echo "Building for: ${{ matrix.output_name }}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Download Official Binaries
         run: |
           VERSION=${{ steps.meta.outputs.version }}
           DL_ARCH=${{ matrix.arch }}
-          
-          echo "Downloading Tailscale v$VERSION for $DL_ARCH..."
           curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${VERSION}_${DL_ARCH}.tgz" -o tailscale.tgz
           tar xzf tailscale.tgz
           
-          # 准备打包目录结构
           mkdir -p staging/bin
           mkdir -p staging/usr/lib/lua/luci/controller/
           mkdir -p staging/usr/lib/lua/luci/view/tailscale_web/
           
-          # 提取二进制文件
           EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "tailscale_*_${DL_ARCH}" | head -n 1)
           mv "$EXTRACTED_DIR/tailscale" staging/bin/
           mv "$EXTRACTED_DIR/tailscaled" staging/bin/
-          rm -f tailscale.tgz
-          rm -rf "$EXTRACTED_DIR"
+          rm -rf "$EXTRACTED_DIR" tailscale.tgz
 
-      # === 关键新步骤：动态生成简易跳转界面 ===
-      - name: Generate Simple LuCI Redirector
+      - name: Generate LuCI Files
         run: |
-          # 1. 生成控制器文件 (定义菜单入口)
-          # 这会将菜单放在 "服务" -> "Tailscale Web" 下
+          # 1. 生成控制器
           cat << 'EOF' > staging/usr/lib/lua/luci/controller/tailscale_web.lua
           module("luci.controller.tailscale_web", package.seeall)
           function index()
-               entry({"admin", "services", "tailscale_web"}, template("tailscale_web/index"), _("Tailscale Web"), 99).dependent = false
+              entry({"admin", "services", "tailscale_web"}, template("tailscale_web/index"), _("Tailscale Web"), 99).dependent = false
           end
           EOF
 
-          # 2. 生成试图模板文件 (HTML跳转页面)
-          # 这段代码会自动获取路由器的LAN口IP，并生成跳转按钮
+          # 2. 生成跳转页面
           cat << 'EOF' > staging/usr/lib/lua/luci/view/tailscale_web/index.htm
           <%+header%>
           <div class="cbi-map">
           <h2 name="content">Tailscale Web 管理</h2>
-          <div class="cbi-section-descr">
-              Tailscale 内置 Web 管理界面已在后台运行。<br/>
-              点击下方按钮将在新窗口中打开完整的官方管理页面。
-          </div>
           <fieldset class="cbi-section">
-              <%
-                  -- 获取 LAN 口 IP 用于构建跳转链接，如果获取失败则尝试用主机名
-                  local uci = require "luci.model.uci".cursor()
-                  local lan_ip = uci:get("network", "lan", "ipaddr") or window.location.hostname
-                  local web_url = "http://" .. lan_ip .. ":5252"
-              %>
               <div style="text-align: center; margin: 30px 0;">
-                  <!-- 使用 JavaScript 打开新窗口跳转到 5252 端口 -->
                   <input type="button" class="cbi-button cbi-button-apply important"
                          style="font-size: 1.3em; padding: 15px 40px; cursor: pointer;"
-                         value="👉 打开 Tailscale Web 管理界面 👈"
-                         onclick="window.open('<%=web_url%>', '_blank'); return false;" />
-                  <br/><br/><br/>
-                  <small style="color: #888;">目标地址: <a href="<%=web_url%>" target="_blank"><%=web_url%></a></small>
+                         value="👉 打开 Tailscale Web 界面 👈"
+                         onclick="window.open('http://' + window.location.hostname + ':5252', '_blank'); return false;" />
+                  <p style="margin-top: 20px; color: #666;">注意：如果无法打开，请确保插件已成功安装并启动。</p>
               </div>
           </fieldset>
           </div>
           <%+footer%>
           EOF
 
-      - name: Generate Install Script
+      - name: Prepare Install Script
         run: |
-          # 生成安装脚本
-          cat << 'EOF' > staging/install.sh
-          #!/bin/sh
-          
-          echo ">>> 1. Installing Core Binaries..."
-          cp -f bin/tailscale /usr/sbin/tailscale
-          cp -f bin/tailscaled /usr/sbin/tailscaled
-          chmod +x /usr/sbin/tailscale /usr/sbin/tailscaled
-          
-          echo ">>> 2. Installing Simple GUI Redirector..."
-          # 直接复制构建好的 LuCI 文件到系统目录
-          cp -rf usr/* /usr/
-          
-          echo ">>> 3. Configuring System & Boot..."
-          if [ ! -f /etc/config/tailscale ]; then touch /etc/config/tailscale; fi
-          
-          # 设置开机自动启动 Web UI (重要：确保跳转过去有东西显示)
-          # 先清理旧配置
-          sed -i '/tailscale web/d' /etc/rc.local
-          # 插入新配置到 exit 0 之前
-          sed -i '/exit 0/i /usr/sbin/tailscale web --listen=0.0.0.0:5252 > /dev/null 2>&1 &' /etc/rc.local
-          # 立即运行一次
-          /usr/sbin/tailscale web --listen=0.0.0.0:5252 > /dev/null 2>&1 &
-          
-          # 清理 LuCI 缓存 (确保菜单立即显示)
-          rm -rf /tmp/luci-indexcache
-          rm -rf /tmp/luci-modulecache/
-          
-          # 创建标准服务启动脚本（确保内核运行）
-          cat << 'EOF_SVC' > /etc/init.d/tailscale
-          #!/bin/sh /etc/rc.common
-          START=99
-          STOP=01
-          USE_PROCD=1
-          start_service() {
-              mkdir -p /etc/tailscale /var/run/tailscale
-              procd_open_instance
-              procd_set_param command /usr/sbin/tailscaled
-              procd_set_param args --state=/etc/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock --port=41641
-              procd_set_param respawn
-              procd_set_param stdout 1
-              procd_set_param stderr 1
-              procd_close_instance
-          }
-          EOF_SVC
-          chmod +x /etc/init.d/tailscale
-          /etc/init.d/tailscale enable
-          /etc/init.d/tailscale restart
-          
-          echo "======================================================="
-          echo "✅ 安装完成！"
-          echo "请按 Ctrl+F5 强制刷新浏览器页面。"
-          echo "入口位置：服务 (Services) -> Tailscale Web"
-          echo "======================================================="
-          EOF
+          # 将你的脚本复制到打包目录
+          cp scripts/install-tailscale.sh staging/install.sh
           chmod +x staging/install.sh
 
       - name: Build .run Package
         run: |
           VERSION=${{ steps.meta.outputs.version }}
           OUT_NAME=${{ matrix.output_name }}
-          makeself --notemp staging tailscale-${VERSION}-${OUT_NAME}.run "Tailscale ${VERSION} (${OUT_NAME}) Installer" ./install.sh
+          makeself --notemp staging tailscale-${VERSION}-${OUT_NAME}.run "Tailscale ${VERSION} (${OUT_NAME})" ./install.sh
 
       - name: Upload Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "v${{ steps.meta.outputs.version }}-redirect"
-          name: "Tailscale v${{ steps.meta.outputs.version }} (With Web Redirect)"
-          files: tailscale-${{ steps.meta.outputs.version }}-${{ matrix.output_name }}.run
+          tag_name: "v${{ steps.meta.outputs.version }}"
+          name: "Tailscale v${{ steps.meta.outputs.version }} Web Edition"
+          files: tailscale-*.run
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
