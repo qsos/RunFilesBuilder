@@ -1,7 +1,12 @@
-name: Build Tailscale Console
+name: Build Tailscale Advanced Console
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: '指定版本 (留空则自动获取最新)'
+        required: false
+        default: ''
   push:
     branches: [ main ]
 
@@ -26,11 +31,21 @@ jobs:
       - name: Prepare Tools
         run: sudo apt-get update && sudo apt-get install -y makeself jq curl
 
-      - name: Download and Prepare Staging
+      - name: Determine Version
         id: meta
         run: |
-          VERSION=$(curl -sL https://api.github.com/repos/tailscale/tailscale/releases/latest | jq -r ".tag_name" | sed 's/v//')
+          if [ -z "${{ github.event.inputs.version }}" ]; then
+            # 自动获取官方最新版本号
+            VERSION=$(curl -sL https://api.github.com/repos/tailscale/tailscale/releases/latest | jq -r ".tag_name" | sed 's/v//')
+          else
+            VERSION=${{ github.event.inputs.version }}
+          fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building Tailscale Version: $VERSION"
+
+      - name: Download and Prepare Staging
+        run: |
+          VERSION=${{ steps.meta.outputs.version }}
           curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${VERSION}_${{ matrix.arch }}.tgz" -o tailscale.tgz
           tar xzf tailscale.tgz
           mkdir -p staging/bin staging/usr/lib/lua/luci/controller/ staging/usr/lib/lua/luci/view/tailscale_web/ staging/www/cgi-bin/
@@ -48,21 +63,35 @@ jobs:
               *action=status*)
                   ST=$(/usr/sbin/tailscale status --json 2>/dev/null)
                   if [ $? -ne 0 ]; then
-                      echo "{\"active\": \"Stopped\", \"ip\": \"-\"}"
+                      echo "{\"active\": \"Stopped\"}"
                   else
                       BACKEND=$(echo "$ST" | jq -r '.BackendState')
                       IP=$(echo "$ST" | jq -r '.TailscaleIPs[0] // "-"')
                       AUTH=$(echo "$ST" | jq -r '.AuthURL // ""')
-                      echo "{\"active\": \"$BACKEND\", \"ip\": \"$IP\", \"url\": \"$AUTH\"}"
+                      DEVICES=$(echo "$ST" | jq -c '.Peer | to_entries | map({hostname: .value.HostName, ip: .value.TailscaleIPs[0], os: .value.OS, online: .value.Online})')
+                      echo "{\"active\": \"$BACKEND\", \"ip\": \"$IP\", \"url\": \"$AUTH\", \"devices\": $DEVICES}"
                   fi
                   ;;
               *action=login*)
-                  /usr/sbin/tailscale up --accept-dns=false >/dev/null 2>&1 &
+                  /usr/sbin/tailscale up --accept-dns=false --reset >/dev/null 2>&1 &
                   echo "{\"result\": \"success\"}"
                   ;;
               *action=logout*)
                   /usr/sbin/tailscale logout >/dev/null 2>&1
                   echo "{\"result\": \"success\"}"
+                  ;;
+              *action=expiry_on*)
+                  /usr/sbin/tailscale up --reset --reset-node-key >/dev/null 2>&1 &
+                  echo "{\"result\": \"expiry_reset\"}"
+                  ;;
+              *action=subnet_on*)
+                  LAN_NET=$(uci get network.lan.ipaddr | cut -d. -f1-3).0/24
+                  /usr/sbin/tailscale up --advertise-routes=$LAN_NET --reset >/dev/null 2>&1 &
+                  echo "{\"result\": \"subnet_enabled\", \"route\": \"$LAN_NET\"}"
+                  ;;
+              *action=subnet_off*)
+                  /usr/sbin/tailscale up --advertise-routes= --reset >/dev/null 2>&1 &
+                  echo "{\"result\": \"subnet_disabled\"}"
                   ;;
           esac
           EOF
@@ -73,46 +102,66 @@ jobs:
           cat << 'EOF' > staging/usr/lib/lua/luci/view/tailscale_web/index.htm
           <%+header%>
           <div class="cbi-map">
-              <h2 name="content">Tailscale 交互控制台</h2>
+              <h2 name="content">Tailscale 高级控制台</h2>
               <fieldset class="cbi-section">
-                  <div style="padding:20px; background:#f9f9f9; border-radius:8px; border:1px solid #ddd;">
-                      <p>节点状态: <b id="ts-status" style="color:orange;">获取中...</b></p>
-                      <p>内网地址: <b id="ts-ip">-</b></p>
-                      <hr style="margin:15px 0; border:0; border-top:1px solid #eee;"/>
-                      <div style="margin-top:15px;">
-                          <button class="cbi-button cbi-button-apply important" style="font-size:1.1em; padding:8px 20px;" onclick="doAct('login')">一键上线</button>
-                          <button class="cbi-button cbi-button-reset" style="font-size:1.1em; padding:8px 20px; margin-left:10px;" onclick="doAct('logout')">注销退出</button>
+                  <legend>系统状态</legend>
+                  <div style="padding:15px; background:#f4f4f4; border:1px solid #ccc;">
+                      <p>节点状态: <b id="ts-status">获取中...</b> | 我的 IP: <b id="ts-ip">-</b></p>
+                      <div style="margin-top:10px;">
+                          <button class="cbi-button cbi-button-apply" onclick="doAct('login')">登录上线</button>
+                          <button class="cbi-button cbi-button-reset" onclick="doAct('logout')">完全退出</button>
+                          <button class="cbi-button" onclick="doAct('subnet_on')">开启子网</button>
+                          <button class="cbi-button" onclick="doAct('subnet_off')">关闭子网</button>
+                          <button class="cbi-button" onclick="doAct('expiry_on')">强制过期</button>
                       </div>
-                      <div id="login-box" style="display:none; margin-top:20px; background:#fffbe6; padding:15px; border:1px solid #ffe58f; border-radius:4px;">
-                          <p style="color:#856404;">⚠️ 需要授权，请点击下方链接登录：</p>
-                          <a id="ts-url" href="#" target="_blank" style="color:#1890ff; font-weight:bold; text-decoration:underline; word-break:break-all;">[ 点击此处跳转官方授权页 ]</a>
+                      <div id="login-box" style="display:none; margin-top:10px; color: red;">
+                          授权链接: <a id="ts-url" href="#" target="_blank">点击此处登录</a>
                       </div>
                   </div>
+              </fieldset>
+              <fieldset class="cbi-section">
+                  <legend>网络设备列表</legend>
+                  <table style="width:100%; border-collapse:collapse;" id="dev-table">
+                      <thead>
+                          <tr style="background:#eee; text-align:left;">
+                              <th style="padding:8px; border:1px solid #ddd;">名称</th>
+                              <th style="padding:8px; border:1px solid #ddd;">IP</th>
+                              <th style="padding:8px; border:1px solid #ddd;">系统</th>
+                              <th style="padding:8px; border:1px solid #ddd;">状态</th>
+                          </tr>
+                      </thead>
+                      <tbody></tbody>
+                  </table>
               </fieldset>
           </div>
           <script>
               function refresh() {
-                  fetch('/cgi-bin/tailscale_api?action=status')
-                  .then(r => r.json())
-                  .then(d => {
+                  fetch('/cgi-bin/tailscale_api?action=status').then(r => r.json()).then(d => {
                       document.getElementById('ts-status').innerText = d.active;
                       document.getElementById('ts-status').style.color = d.active === "Running" ? "green" : "red";
                       document.getElementById('ts-ip').innerText = d.ip;
-                      if(d.url && d.url !== "") {
+                      if(d.url) {
                           document.getElementById('login-box').style.display = 'block';
                           document.getElementById('ts-url').href = d.url;
                       } else {
                           document.getElementById('login-box').style.display = 'none';
                       }
-                  })
-                  .catch(() => { document.getElementById('ts-status').innerText = "后端未响应"; });
+                      const tbody = document.querySelector('#dev-table tbody');
+                      tbody.innerHTML = '';
+                      if(d.devices) {
+                          d.devices.forEach(dev => {
+                              tbody.innerHTML += `<tr>
+                                  <td style="padding:8px; border:1px solid #ddd;">${dev.hostname}</td>
+                                  <td style="padding:8px; border:1px solid #ddd;">${dev.ip}</td>
+                                  <td style="padding:8px; border:1px solid #ddd;">${dev.os}</td>
+                                  <td style="padding:8px; border:1px solid #ddd; color:${dev.online?'green':'#999'}">${dev.online?'● 在线':'○ 离线'}</td>
+                              </tr>`;
+                          });
+                      }
+                  });
               }
-              function doAct(a) {
-                  document.getElementById('ts-status').innerText = "正在发送指令...";
-                  fetch('/cgi-bin/tailscale_api?action=' + a);
-                  setTimeout(refresh, 3000);
-              }
-              setInterval(refresh, 5000); refresh();
+              function doAct(a) { fetch('/cgi-bin/tailscale_api?action=' + a); setTimeout(refresh, 3000); }
+              setInterval(refresh, 8000); refresh();
           </script>
           <%+footer%>
           EOF
@@ -128,15 +177,18 @@ jobs:
 
       - name: Final Build
         run: |
+          VERSION=${{ steps.meta.outputs.version }}
+          ARCH_NAME=${{ matrix.output_name }}
           cp shell/install-tailscale.sh staging/install.sh
           chmod +x staging/install.sh
-          makeself --notemp staging tailscale-${{ matrix.output_name }}.run "Tailscale Console" ./install.sh
+          # 关键修改：文件名现在包含版本号
+          makeself --notemp staging "tailscale-${VERSION}-${ARCH_NAME}.run" "Tailscale ${VERSION} Console" ./install.sh
 
       - name: Upload Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v${{ steps.meta.outputs.version }}
+          tag_name: "v${{ steps.meta.outputs.version }}"
           name: "Tailscale v${{ steps.meta.outputs.version }} Console"
-          files: "*.run"
+          files: "tailscale-*.run"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
