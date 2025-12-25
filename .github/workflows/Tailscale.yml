@@ -1,15 +1,9 @@
-name: Build Tailscale .run (x86 & arm64 + Simple GUI)
+name: Build Tailscale .run (Custom Console)
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Tailscale Version (留空自动最新)'
-        required: false
-        default: ''
   push:
-    branches:
-      - main
+    branches: [ main ]
 
 jobs:
   build:
@@ -18,7 +12,6 @@ jobs:
       contents: write
     
     strategy:
-      fail-fast: false
       matrix:
         include:
           - arch: amd64
@@ -27,86 +20,115 @@ jobs:
             output_name: arm64
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y makeself jq curl
+      - name: Prepare SDK & Tools
+        run: sudo apt-get update && sudo apt-get install -y makeself jq curl
 
-      - name: Determine Version
+      - name: Download Binaries
         id: meta
         run: |
-          if [ -z "${{ inputs.version }}" ]; then
-            TAG=$(curl -sL https://api.github.com/repos/tailscale/tailscale/releases/latest | jq -r ".tag_name")
-            VERSION=${TAG#v}
-          else
-            VERSION=${{ inputs.version }}
-          fi
+          VERSION=$(curl -sL https://api.github.com/repos/tailscale/tailscale/releases/latest | jq -r ".tag_name" | sed 's/v//')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Download Official Binaries
-        run: |
-          VERSION=${{ steps.meta.outputs.version }}
-          DL_ARCH=${{ matrix.arch }}
-          curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${VERSION}_${DL_ARCH}.tgz" -o tailscale.tgz
+          curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${VERSION}_${{ matrix.arch }}.tgz" -o tailscale.tgz
           tar xzf tailscale.tgz
-          
-          mkdir -p staging/bin
-          mkdir -p staging/usr/lib/lua/luci/controller/
-          mkdir -p staging/usr/lib/lua/luci/view/tailscale_web/
-          
-          EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "tailscale_*_${DL_ARCH}" | head -n 1)
-          mv "$EXTRACTED_DIR/tailscale" staging/bin/
-          mv "$EXTRACTED_DIR/tailscaled" staging/bin/
-          rm -rf "$EXTRACTED_DIR" tailscale.tgz
+          mkdir -p staging/bin staging/usr/lib/lua/luci/controller/ staging/usr/lib/lua/luci/view/tailscale_web/ staging/www/cgi-bin/
+          mv tailscale_*/tailscale staging/bin/
+          mv tailscale_*/tailscaled staging/bin/
 
-      - name: Generate LuCI Files
+      - name: Create Backend API (CGI)
         run: |
-          # 1. 生成控制器
-          cat << 'EOF' > staging/usr/lib/lua/luci/controller/tailscale_web.lua
-          module("luci.controller.tailscale_web", package.seeall)
-          function index()
-              entry({"admin", "services", "tailscale_web"}, template("tailscale_web/index"), _("Tailscale Web"), 99).dependent = false
-          end
+          # 这个是处理 登录/退出/状态 的后端脚本
+          cat << 'EOF' > staging/www/cgi-bin/tailscale_api
+          #!/bin/sh
+          echo "Content-type: application/json"
+          echo ""
+          case "$QUERY_STRING" in
+              *action=status*)
+                  ST=$(/usr/sbin/tailscale status --json 2>/dev/null)
+                  BACKEND=$(echo "$ST" | jq -r '.BackendState // "Stopped"')
+                  IP=$(/usr/sbin/tailscale ip -4 2>/dev/null)
+                  AUTH=$(echo "$ST" | jq -r '.AuthURL // ""')
+                  echo "{\"active\": \"$BACKEND\", \"ip\": \"$IP\", \"url\": \"$AUTH\"}"
+                  ;;
+              *action=login*)
+                  /usr/sbin/tailscale up --accept-dns=false >/dev/null 2>&1 &
+                  echo "{\"result\": \"starting\"}"
+                  ;;
+              *action=logout*)
+                  /usr/sbin/tailscale logout >/dev/null 2>&1
+                  echo "{\"result\": \"success\"}"
+                  ;;
+          esac
           EOF
+          chmod +x staging/www/cgi-bin/tailscale_api
 
-          # 2. 生成跳转页面
+      - name: Create Console UI (HTML)
+        run: |
+          # 制作 LuCI 控制台界面
           cat << 'EOF' > staging/usr/lib/lua/luci/view/tailscale_web/index.htm
           <%+header%>
           <div class="cbi-map">
-          <h2 name="content">Tailscale Web 管理</h2>
-          <fieldset class="cbi-section">
-              <div style="text-align: center; margin: 30px 0;">
-                  <input type="button" class="cbi-button cbi-button-apply important"
-                         style="font-size: 1.3em; padding: 15px 40px; cursor: pointer;"
-                         value="👉 打开 Tailscale Web 界面 👈"
-                         onclick="window.open('http://' + window.location.hostname + ':5252', '_blank'); return false;" />
-                  <p style="margin-top: 20px; color: #666;">注意：如果无法打开，请确保插件已成功安装并启动。</p>
-              </div>
-          </fieldset>
+              <h2 name="content">Tailscale 交互控制台</h2>
+              <fieldset class="cbi-section">
+                  <div style="padding:20px; background:#f9f9f9; border-radius:8px; border:1px solid #ddd;">
+                      <p>节点状态: <b id="ts-status" style="color:orange;">加载中...</b></p>
+                      <p>内网地址: <b id="ts-ip">-</b></p>
+                      <hr/>
+                      <div style="margin-top:15px;">
+                          <button class="cbi-button cbi-button-apply important" onclick="doAct('login')">一键上线</button>
+                          <button class="cbi-button cbi-button-reset" onclick="doAct('logout')">注销退出</button>
+                      </div>
+                      <div id="login-box" style="display:none; margin-top:15px; background:#fffbe6; padding:10px; border:1px solid #ffe58f;">
+                          <p>需要授权，请点击链接登录：</p>
+                          <a id="ts-url" href="#" target="_blank" style="color:#1890ff; font-weight:bold;">[ 授权链接 ]</a>
+                      </div>
+                  </div>
+              </fieldset>
           </div>
+          <script>
+              function refresh() {
+                  fetch('/cgi-bin/tailscale_api?action=status').then(r=>r.json()).then(d=>{
+                      document.getElementById('ts-status').innerText = d.active;
+                      document.getElementById('ts-status').style.color = d.active==="Running"?"green":"red";
+                      document.getElementById('ts-ip').innerText = d.ip || "未分配";
+                      if(d.url) {
+                          document.getElementById('login-box').style.display='block';
+                          document.getElementById('ts-url').href = d.url;
+                      } else {
+                          document.getElementById('login-box').style.display='none';
+                      }
+                  });
+              }
+              function doAct(a) {
+                  fetch('/cgi-bin/tailscale_api?action='+a);
+                  setTimeout(refresh, 2000);
+              }
+              setInterval(refresh, 5000); refresh();
+          </script>
           <%+footer%>
           EOF
 
-      - name: Prepare Install Script
+      - name: Create LuCI Controller
         run: |
-          # 将你的脚本复制到打包目录
-          cp scripts/install-tailscale.sh staging/install.sh
+          cat << 'EOF' > staging/usr/lib/lua/luci/controller/tailscale_web.lua
+          module("luci.controller.tailscale_web", package.seeall)
+          function index()
+              entry({"admin", "services", "tailscale_web"}, template("tailscale_web/index"), _("Tailscale Console"), 99)
+          end
+          EOF
+
+      - name: Final Build
+        run: |
+          cp shell/install-tailscale.sh staging/install.sh
           chmod +x staging/install.sh
+          makeself --notemp staging tailscale-${{ steps.meta.outputs.version }}-${{ matrix.output_name }}.run "Tailscale Console" ./install.sh
 
-      - name: Build .run Package
-        run: |
-          VERSION=${{ steps.meta.outputs.version }}
-          OUT_NAME=${{ matrix.output_name }}
-          makeself --notemp staging tailscale-${VERSION}-${OUT_NAME}.run "Tailscale ${VERSION} (${OUT_NAME})" ./install.sh
-
-      - name: Upload Release
+      - name: Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "v${{ steps.meta.outputs.version }}"
-          name: "Tailscale v${{ steps.meta.outputs.version }} Web Edition"
-          files: tailscale-*.run
+          tag_name: v${{ steps.meta.outputs.version }}
+          files: "*.run"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
