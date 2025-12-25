@@ -20,18 +20,18 @@ jobs:
           chmod +x shell/install-tailscale.sh
           cp shell/install-tailscale.sh x86_64/install.sh
 
-      - name: Download Tailscale core (latest amd64)
+      - name: Download Tailscale core (amd64)
         run: |
-          curl -L \
-            https://pkgs.tailscale.com/stable/tailscale_1.92.3_amd64.tgz \
-            -o tailscale.tgz
+          curl -L https://pkgs.tailscale.com/stable/tailscale_1.92.3_amd64.tgz -o tailscale.tgz
           tar xf tailscale.tgz
-          DIR=$(tar tf tailscale.tgz | head -n1 | cut -d/ -f1)
-          cp "$DIR/tailscale" x86_64/
-          cp "$DIR/tailscaled" x86_64/
+
+          REAL_DIR=$(tar tf tailscale.tgz | head -n1 | cut -d/ -f1)
+
+          cp "$REAL_DIR/tailscale" x86_64/
+          cp "$REAL_DIR/tailscaled" x86_64/
           chmod +x x86_64/tailscale x86_64/tailscaled
 
-      - name: Build .run package
+      - name: Build run file
         run: |
           mkdir -p output
           makeself x86_64 \
