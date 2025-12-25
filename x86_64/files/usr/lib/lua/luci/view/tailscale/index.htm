@@ -1,33 +1,64 @@
-<h2>Tailscale</h2>
+<%+header%>
 
-<form method="post">
-  <label>Auth Key</label>
-  <input type="text" name="key" style="width:400px"/><br/><br/>
+<div class="cbi-map">
+    <h2 style="margin-bottom:20px">Tailscale 控制面板</h2>
 
-  <input class="cbi-button cbi-button-apply" type="submit" name="login" value="登录"/>
-  <input class="cbi-button cbi-button-apply" type="submit" name="start" value="启动"/>
-  <input class="cbi-button cbi-button-reset" type="submit" name="stop" value="停止"/>
-</form>
+    <div style="background:#ffffff; padding:15px; border:1px solid #dddddd; border-radius:4px;">
+        <p>
+            <strong>状态：</strong>
+            <span id="st-txt">检测中...</span>
+        </p>
+        <p>
+            <strong>IP：</strong>
+            <span id="ip-txt">-</span>
+        </p>
 
-<pre>
-<%=
-luci.sys.exec("tailscale status 2>/dev/null")
-%>
-</pre>
+        <button
+            type="button"
+            class="cbi-button"
+            onclick="loginTS()">
+            登录 Tailscale
+        </button>
 
-<%
-if luci.http.formvalue("login") then
-  local key = luci.http.formvalue("key")
-  if key and #key > 10 then
-    luci.sys.exec("tailscale up --authkey=" .. key)
-  end
-end
+        <button
+            type="button"
+            class="cbi-button-negative"
+            onclick="logoutTS()"
+            style="margin-left:10px">
+            注销
+        </button>
+    </div>
+</div>
 
-if luci.http.formvalue("start") then
-  luci.sys.exec("/etc/init.d/tailscale start")
-end
+<script type="text/javascript">
+function refresh() {
+    fetch('/cgi-bin/tailscale_api?action=status')
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            document.getElementById('st-txt').innerText = d.active || '-';
+            document.getElementById('st-txt').style.color =
+                (d.active === '运行中') ? 'green' : 'red';
+            document.getElementById('ip-txt').innerText = d.ip || '-';
+        })
+        .catch(function() {
+            document.getElementById('st-txt').innerText = '接口错误';
+            document.getElementById('st-txt').style.color = 'red';
+        });
+}
 
-if luci.http.formvalue("stop") then
-  luci.sys.exec("/etc/init.d/tailscale stop")
-end
-%>
+function loginTS() {
+    window.open('https://login.tailscale.com/a/console', '_blank');
+    fetch('/cgi-bin/tailscale_api?action=login');
+    setTimeout(refresh, 3000);
+}
+
+function logoutTS() {
+    fetch('/cgi-bin/tailscale_api?action=logout');
+    setTimeout(refresh, 2000);
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+
+<%+footer%>
