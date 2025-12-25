@@ -1,47 +1,4 @@
-name: Build Tailscale Advanced Console
-
-on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: '指定版本 (留空则自动获取最新)'
-        required: false
-        default: ''
-
-permissions:
-  contents: write
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Prepare Tools
-        run: sudo apt-get update && sudo apt-get install -y makeself jq curl
-
-      - name: Get Version
-        id: v
-        run: |
-          if [ -z "${{ github.event.inputs.version }}" ]; then
-            VERSION=$(curl -sL https://api.github.com/repos/tailscale/tailscale/releases/latest | jq -r ".tag_name" | sed 's/v//')
-          else
-            VERSION=${{ github.event.inputs.version }}
-          fi
-          echo "tag=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Download Binary
-        run: |
-          VER=${{ steps.v.outputs.tag }}
-          curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${VER}_amd64.tgz" -o ts.tgz
-          tar xzf ts.tgz
-          mkdir -p staging/bin staging/usr/lib/lua/luci/controller/ staging/usr/lib/lua/luci/view/tailscale_web/ staging/www/cgi-bin/
-          mv tailscale_*/tailscale staging/bin/
-          mv tailscale_*/tailscaled staging/bin/
-          rm -rf ts.tgz tailscale_*
-
-      - name: Create Backend API
+- name: Create Backend API
         run: |
           cat << 'EOF' > staging/www/cgi-bin/tailscale_api
           #!/bin/sh
@@ -50,11 +7,12 @@ jobs:
           TS="/bin/tailscale"
           case "$QUERY_STRING" in
               *action=status*)
-                  ST=$($TS status --json 2>/dev/null)
+                  # 增加 2 秒超时，防止网页死锁
+                  ST=$(timeout 2 $TS status --json 2>/dev/null)
                   STATE=$(echo "$ST" | jq -r '.BackendState // "未运行"')
                   if [ "$STATE" != "Running" ]; then
-                      # 抓取链接并强行去除换行符，防止前端解析失败
-                      URL=$($TS up --accept-dns=false --reset 2>&1 | grep -o 'https://login.tailscale.com/a/[^ ]*' | tr -d '\r\n')
+                      # 异步获取 URL，如果 3 秒拿不到就返回空，让网页稍后重试
+                      URL=$(timeout 3 $TS up --accept-dns=false --reset 2>&1 | grep -o 'https://login.tailscale.com/a/[^ ]*' | head -n 1)
                       echo "{\"active\": \"未登录\", \"url\": \"$URL\", \"devices\": []}"
                   else
                       IP=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0] // "-"')
@@ -75,13 +33,13 @@ jobs:
               
               <div id="auth-box" style="display:none; background:#fffbe6; padding:20px; border:1px solid #ffe58f; border-radius:4px; margin-bottom:20px; text-align:center;">
                   <strong style="color:#856404; font-size:16px;">⚠️ 需要授权登录</strong>
-                  <p style="margin:10px 0;">点击下方按钮前往官网授权，完成后回到此页面即可。</p>
-                  <a id="auth-btn" href="#" target="_blank" style="display:inline-block; padding:12px 24px; background:#1890ff; color:#fff; border-radius:4px; text-decoration:none; font-weight:bold; font-size:16px; box-shadow: 0 2px 0 rgba(0,0,0,0.045);">👉 立即前往官网授权 👈</a>
+                  <p id="auth-msg" style="margin:10px 0;">正在生成授权链接，请稍候...</p>
+                  <a id="auth-btn" href="#" target="_blank" style="display:none; padding:12px 24px; background:#1890ff; color:#fff; border-radius:4px; text-decoration:none; font-weight:bold;">👉 点击前往官网授权 👈</a>
               </div>
 
               <div style="background:#fff; padding:15px; border:1px solid #ddd; border-radius:4px; margin-bottom:20px; display:flex; justify-content:space-between; align-items:center;">
-                  <div><strong>服务状态:</strong> <span id="st-txt">检测中...</span><br><small id="ip-txt" style="color:#888">地址: -</small></div>
-                  <button class="cbi-button cbi-button-reset" onclick="fetch('/cgi-bin/tailscale_api?action=logout');location.reload();">断开并重置服务</button>
+                  <div><strong>服务状态:</strong> <span id="st-txt">初始化...</span><br><small id="ip-txt" style="color:#888">地址: -</small></div>
+                  <button class="cbi-button cbi-button-reset" onclick="doLogout()">重置服务</button>
               </div>
 
               <table class="cbi-section-table" style="width:100%; table-layout:fixed; border:1px solid #eee;">
@@ -91,20 +49,35 @@ jobs:
           </div>
 
           <script>
+              function doLogout() {
+                  if(confirm('确定要重置并注销吗？')) {
+                      fetch('/cgi-bin/tailscale_api?action=logout').then(() => location.reload());
+                  }
+              }
+
               function refresh() {
-                  fetch('/cgi-bin/tailscale_api?action=status').then(r => r.json()).then(d => {
+                  fetch('/cgi-bin/tailscale_api?action=status')
+                  .then(r => r.json())
+                  .then(d => {
                       const st = document.getElementById('st-txt');
                       const abox = document.getElementById('auth-box');
+                      const amsg = document.getElementById('auth-msg');
                       const abtn = document.getElementById('auth-btn');
                       
                       st.innerText = d.active;
                       st.style.color = (d.active === "运行中") ? "#28a745" : "#ff4d4f";
                       document.getElementById('ip-txt').innerText = "地址: " + (d.ip || "-");
 
-                      // 核心逻辑：如果 API 返回了 URL，就显示授权大按钮
-                      if (d.active === "未登录" && d.url) {
+                      if (d.active === "未登录") {
                           abox.style.display = 'block';
-                          abtn.href = d.url;
+                          if (d.url) {
+                              abtn.href = d.url;
+                              abtn.style.display = 'inline-block';
+                              amsg.innerText = "授权链接已就绪，请点击下方按钮完成登录：";
+                          } else {
+                              abtn.style.display = 'none';
+                              amsg.innerText = "正在获取最新授权链接，请稍等 (约5-10秒)...";
+                          }
                       } else {
                           abox.style.display = 'none';
                       }
@@ -114,35 +87,14 @@ jobs:
                           d.devices.forEach(v => {
                               h += '<tr class="cbi-section-table-row"><td style="padding:10px;"><strong>'+v.hostname+'</strong></td><td style="padding:10px;"><code>'+v.ip+'</code></td><td style="padding:10px;">'+(v.online ? '<span style="color:#28a745">● 在线</span>' : '<span style="color:#999">○ 离线</span>')+'</td></tr>';
                           });
-                      } else { h = '<tr><td colspan="3" style="text-align:center;padding:20px;color:#999;">等待登录授权...</td></tr>'; }
+                      } else { h = '<tr><td colspan="3" style="text-align:center;padding:20px;color:#999;">'+(d.active === "运行中" ? "当前账号下暂无其他节点" : "等待登录完成后显示列表")+'</td></tr>'; }
                       document.getElementById('dev-list').innerHTML = h;
+                  })
+                  .catch(e => {
+                      document.getElementById('st-txt').innerText = "API 响应缓慢，重试中...";
                   });
               }
               refresh(); setInterval(refresh, 5000);
           </script>
           <%+footer%>
           EOF
-
-      - name: Create Controller
-        run: |
-          cat << 'EOF' > staging/usr/lib/lua/luci/controller/tailscale_web.lua
-          module("luci.controller.tailscale_web", package.seeall)
-          function index()
-              entry({"admin", "services", "tailscale_web"}, template("tailscale_web/index"), _("Tailscale"), 99)
-          end
-          EOF
-
-      - name: Build Package
-        run: |
-          cp shell/install-tailscale.sh staging/install.sh
-          chmod +x staging/install.sh
-          makeself --notemp staging "tailscale-${{ steps.v.outputs.tag }}-x86.run" "Tailscale" ./install.sh
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: "v${{ steps.v.outputs.tag }}"
-          name: "Tailscale-Console-v${{ steps.v.outputs.tag }}"
-          files: "*.run"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
