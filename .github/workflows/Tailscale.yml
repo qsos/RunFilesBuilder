@@ -1,4 +1,4 @@
-name: Build Tailscale Advanced Console
+name: Build Tailscale iStoreOS Simple Console
 
 on:
   workflow_dispatch:
@@ -7,8 +7,6 @@ on:
         description: '指定版本 (留空则自动获取最新)'
         required: false
         default: ''
-  push:
-    branches: [ master, main ]
 
 permissions:
   contents: write
@@ -28,14 +26,11 @@ jobs:
         id: v
         run: |
           if [ -z "${{ github.event.inputs.version }}" ]; then
-            # 留空则拉取最新版
             VERSION=$(curl -sL https://api.github.com/repos/tailscale/tailscale/releases/latest | jq -r ".tag_name" | sed 's/v//')
           else
-            # 否则使用指定的版本
             VERSION=${{ github.event.inputs.version }}
           fi
           echo "tag=$VERSION" >> $GITHUB_OUTPUT
-          echo "Building version: $VERSION"
 
       - name: Download Binary
         run: |
@@ -47,127 +42,157 @@ jobs:
           mv tailscale_*/tailscaled staging/bin/
           rm -rf ts.tgz tailscale_*
 
-      - name: Create Backend API
+      - name: Create Backend API (修复登录注销)
         run: |
           cat << 'EOF' > staging/www/cgi-bin/tailscale_api
           #!/bin/sh
           echo "Content-type: application/json"
           echo ""
+          
+          # 1. 处理控制动作
           case "$QUERY_STRING" in
-              *action=status*)
-                  ST=$(/usr/sbin/tailscale status --json 2>/dev/null)
-                  if [ $? -ne 0 ]; then echo "{\"active\": \"Stopped\"}"; else
-                      USER=$(echo "$ST" | jq -r '.Self.User')
-                      MAIL=$(echo "$ST" | jq -r ".User[\"$USER\"].LoginName // \"未登录\"")
-                      IP=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0]')
-                      DEVICES=$(echo "$ST" | jq -c '.Peer | to_entries | map({hostname: .value.HostName, ip: .value.TailscaleIPs[0], os: .value.OS, version: .value.Version, online: .value.Online})')
-                      echo "{\"active\": \"Running\", \"ip\": \"$IP\", \"mail\": \"$MAIL\", \"devices\": $DEVICES}"; fi ;;
-              *action=login*) /usr/sbin/tailscale up --accept-dns=false --reset >/dev/null 2>&1 & echo "{\"result\": \"ok\"}" ;;
-              *action=logout*) /usr/sbin/tailscale logout; echo "{\"result\": \"ok\"}" ;;
-              *action=subnet_on*) LAN=$(uci get network.lan.ipaddr | cut -d. -f1-3).0/24; /usr/sbin/tailscale up --advertise-routes=$LAN --reset >/dev/null 2>&1 & echo "{\"result\": \"ok\"}" ;;
-              *action=subnet_off*) /usr/sbin/tailscale up --advertise-routes= --reset >/dev/null 2>&1 & echo "{\"result\": \"ok\"}" ;;
-              *action=expiry_toggle*) /usr/sbin/tailscale up --reset-node-key >/dev/null 2>&1 & echo "{\"result\": \"ok\"}" ;;
+              *action=login*)
+                  /usr/sbin/tailscale up --accept-dns=false --reset >/dev/null 2>&1 &
+                  echo "{\"result\": \"ok\"}"
+                  exit 0
+                  ;;
+              *action=logout*)
+                  /usr/sbin/tailscale logout >/dev/null 2>&1
+                  echo "{\"result\": \"ok\"}"
+                  exit 0
+                  ;;
           esac
+
+          # 2. 获取状态数据
+          ST=$(/usr/sbin/tailscale status --json 2>/dev/null)
+          if [ $? -ne 0 ]; then
+              echo "{\"active\": \"未运行\"}"
+          else
+              IP=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0] // "-"')
+              # 精准抓取版本和系统，防止出现 null
+              DEVICES=$(echo "$ST" | jq -c '.Peer | to_entries | map({
+                  name: .value.HostName,
+                  ip: (.value.TailscaleIPs[0] // "-"),
+                  os: (.value.OS // "Linux"),
+                  ver: (.value.Version // "-"),
+                  online: .value.Online
+              })')
+              echo "{\"active\": \"运行中\", \"ip\": \"$IP\", \"devices\": $DEVICES}"
+          fi
           EOF
           chmod 755 staging/www/cgi-bin/tailscale_api
 
-      - name: Create UI (iStoreOS Style)
+      - name: Create UI (简约中文布局)
         run: |
           cat << 'EOF' > staging/usr/lib/lua/luci/view/tailscale_web/index.htm
           <%+header%>
           <style>
-              .ts-bar { margin-bottom: 15px; padding: 15px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; }
-              .m-mail { color: #6c757d; font-size: 0.85em; display: block; }
-              .tag { background: #f1f3f5; padding: 2px 5px; border-radius: 3px; font-size: 11px; border: 1px solid #dee2e6; margin-right: 5px; color: #495057; }
-              .tag-blue { background: #e7f5ff; color: #007bff; border-color: #74c0fc; }
+              .ts-card { background: #fff; padding: 20px; border: 1px solid #d9d9d9; border-radius: 4px; margin-bottom: 20px; }
+              .ts-flex { display: flex; justify-content: space-between; align-items: center; }
+              .ts-status { font-size: 16px; font-weight: bold; }
+              .ts-ip { color: #888; font-size: 13px; margin-top: 5px; }
+              .status-ok { color: #52c41a; } .status-err { color: #ff4d4f; }
+              
+              .ts-table { width: 100%; border-collapse: collapse; margin-top: 10px; border: 1px solid #f0f0f0; }
+              .ts-table th { background: #fafafa; padding: 12px; text-align: left; border-bottom: 1px solid #f0f0f0; }
+              .ts-table td { padding: 12px; border-bottom: 1px solid #f0f0f0; }
+              
               .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 8px; }
-              .dot-on { background: #28a745; box-shadow: 0 0 5px #28a745; }
-              .dot-off { background: #adb5bd; }
-              .drop-btn { cursor: pointer; padding: 4px 10px; border: 1px solid #ced4da; background: #fff; border-radius: 4px; }
-              .drop-menu { display: none; position: absolute; background: #fff; border: 1px solid #dee2e6; z-index: 1000; right: 0; box-shadow: 0 4px 12px rgba(0,0,0,0.15); min-width: 140px; }
-              .drop-menu a { display: block; padding: 10px 15px; text-decoration: none; color: #333; border-bottom: 1px solid #f1f3f5; font-size: 13px; text-align: left; }
-              .drop-menu a:hover { background: #f8f9fa; }
-              .show { display: block; }
+              .dot-on { background: #52c41a; } .dot-off { background: #bfbfbf; }
+              .sys-info { font-size: 11px; color: #999; }
           </style>
+
           <div class="cbi-map">
-              <h2 name="content">Tailscale 交互控制台</h2>
-              <div class="ts-bar">
-                  <div><strong>账号:</strong> <span id="mail">...</span><br><small id="ip" style="color:#888">IP: -</small></div>
+              <h2 style="margin-bottom:15px">Tailscale 控制面板</h2>
+              
+              <div class="ts-card ts-flex">
                   <div>
-                      <button class="cbi-button cbi-button-apply" onclick="doAct('login')">登录</button>
-                      <button class="cbi-button cbi-button-reset" onclick="doAct('logout')">注销</button>
+                      <div class="ts-status">状态: <span id="st-txt">读取中...</span></div>
+                      <div class="ts-ip">内网地址: <span id="st-ip">-</span></div>
+                  </div>
+                  <div>
+                      <button class="cbi-button cbi-button-apply" onclick="runAction('login')">一键上线</button>
+                      <button class="cbi-button cbi-button-reset" onclick="runAction('logout')">注销退出</button>
                   </div>
               </div>
-              <fieldset class="cbi-section">
-                  <legend>网络设备列表</legend>
-                  <table class="cbi-section-table" id="dev-table">
-                      <tr class="cbi-section-table-titles">
-                          <th class="cbi-section-table-cell">MACHINE</th>
-                          <th class="cbi-section-table-cell">ADDRESSES</th>
-                          <th class="cbi-section-table-cell">VERSION</th>
-                          <th class="cbi-section-table-cell">STATUS</th>
-                          <th class="cbi-section-table-cell"></th>
-                      </tr>
+
+              <div class="cbi-section">
+                  <table class="ts-table" id="dev-list">
+                      <thead>
+                          <tr>
+                              <th>设备名称</th>
+                              <th>内网 IP</th>
+                              <th>版本 / 系统</th>
+                              <th>状态</th>
+                          </tr>
+                      </thead>
+                      <tbody></tbody>
                   </table>
-              </fieldset>
+              </div>
           </div>
+
           <script>
-              function refresh() {
-                  fetch('/cgi-bin/tailscale_api?action=status').then(r => r.json()).then(d => {
-                      document.getElementById('mail').innerText = d.mail || "未登录";
-                      document.getElementById('ip').innerText = "IP: " + (d.ip || "-");
-                      const t = document.getElementById('dev-table');
-                      while(t.rows.length > 1) t.deleteRow(1);
-                      if(d.devices) d.devices.forEach((dev, i) => {
-                          const r = t.insertRow();
-                          r.className = "cbi-section-table-row";
-                          r.innerHTML = `
-                              <td class="cbi-section-table-cell">
-                                  <strong>${dev.hostname}</strong><span class="m-mail">${d.mail}</span>
-                                  <span class="tag">Expiry disabled</span><span class="tag tag-blue">Subnets</span>
-                              </td>
-                              <td class="cbi-section-table-cell">${dev.ip}</td>
-                              <td class="cbi-section-table-cell">${dev.version}<br><small style="color:#999">${dev.os}</small></td>
-                              <td class="cbi-section-table-cell"><span class="dot ${dev.online?'dot-on':'dot-off'}"></span>${dev.online?'Connected':'Offline'}</td>
-                              <td class="cbi-section-table-cell" style="position:relative">
-                                  <button class="drop-btn" onclick="toggleM(${i})">•••</button>
-                                  <div id="m-${i}" class="drop-menu">
-                                      <a href="javascript:void(0)" onclick="doAct('subnet_on')">开启子网路由</a>
-                                      <a href="javascript:void(0)" onclick="doAct('subnet_off')">关闭子网路由</a>
-                                      <a href="javascript:void(0)" onclick="doAct('expiry_toggle')">强制过期重连</a>
-                                      <a href="javascript:void(0)" style="color:red" onclick="doAct('logout')">移除节点</a>
-                                  </div>
-                              </td>`;
-                      });
+              function updateUI() {
+                  fetch('/cgi-bin/tailscale_api').then(r => r.json()).then(d => {
+                      const txt = document.getElementById('st-txt');
+                      txt.innerText = d.active || "未连接";
+                      txt.className = d.active === "运行中" ? "status-ok" : "status-err";
+                      document.getElementById('st-ip').innerText = d.ip || "-";
+
+                      const body = document.querySelector('#dev-list tbody');
+                      body.innerHTML = '';
+                      if(d.devices && d.devices.length > 0) {
+                          d.devices.forEach(dev => {
+                              body.innerHTML += `<tr>
+                                  <td><strong>${dev.name}</strong></td>
+                                  <td><code>${dev.ip}</code></td>
+                                  <td>${dev.ver}<br><span class="sys-info">${dev.os}</span></td>
+                                  <td><span class="dot ${dev.online?'dot-on':'dot-off'}"></span>${dev.online?'在线':'离线'}</td>
+                              </tr>`;
+                          });
+                      } else {
+                          body.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:20px;color:#999">暂无网络节点</td></tr>';
+                      }
                   });
               }
-              function toggleM(i) { var m = document.getElementById('m-'+i); m.classList.toggle('show'); }
-              function doAct(a) { fetch('/cgi-bin/tailscale_api?action='+a); setTimeout(refresh, 2500); }
-              refresh(); setInterval(refresh, 10000);
-              window.onclick = function(e) { if (!e.target.matches('.drop-btn')) { 
-                  var ds = document.getElementsByClassName("drop-menu");
-                  for (var i = 0; i < ds.length; i++) { ds[i].classList.remove('show'); }
-              }};
+
+              function runAction(a) {
+                  fetch('/cgi-bin/tailscale_api?action=' + a).then(() => {
+                      setTimeout(updateUI, 2000);
+                  });
+              }
+
+              updateUI();
+              setInterval(updateUI, 8000);
           </script>
           <%+footer%>
+          EOF
+
+      - name: Create Controller
+        run: |
+          cat << 'EOF' > staging/usr/lib/lua/luci/controller/tailscale_web.lua
+          module("luci.controller.tailscale_web", package.seeall)
+          function index()
+              entry({"admin", "services", "tailscale_web"}, template("tailscale_web/index"), _("Tailscale 控制台"), 99)
+          end
           EOF
 
       - name: Build Package
         run: |
           cp shell/install-tailscale.sh staging/install.sh
           chmod +x staging/install.sh
-          makeself --notemp staging "tailscale-${{ steps.v.outputs.tag }}-x86.run" "TS" ./install.sh
+          makeself --notemp staging "tailscale-${{ steps.v.outputs.tag }}-x86.run" "Tailscale" ./install.sh
 
-      - name: Save Artifact (双重保险)
-        uses: actions/upload-artifact@v4
-        with:
-          name: tailscale-v${{ steps.v.outputs.tag }}
-          path: "*.run"
-
-      - name: Create Release
+      - name: Create Release (参照 PassWall 命名格式)
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "v${{ steps.v.outputs.tag }}"
+          name: "Tailscale-Console-v${{ steps.v.outputs.tag }}" # 修正命名：插件名-版本号
           files: "*.run"
+          body: |
+            ## Tailscale iStoreOS 控制面板
+            - 内核版本: ${{ steps.v.outputs.tag }}
+            - 适配 iStoreOS 原生浅色界面
+            - 优化登录/注销逻辑
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
