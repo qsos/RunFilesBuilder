@@ -1,32 +1,25 @@
 #!/bin/sh
-
-echo "Content-Type: application/json"
+echo "Content-type: application/json"
 echo ""
 
 TS="/bin/tailscale"
 
 case "$QUERY_STRING" in
     *action=status*)
-        ST="$($TS status --json 2>/dev/null)"
-        if [ -z "$ST" ]; then
-            echo '{"active":"未运行","ip":"-"}'
+        ST=$($TS status --json 2>/dev/null)
+        ACTIVE=$(echo "$ST" | jq -r '.BackendState // "未运行"')
+        if [ "$ACTIVE" != "Running" ]; then
+            # 去掉 --reset 以避免每次刷新都重置状态
+            URL=$($TS up --accept-dns=false 2>&1 | grep -o 'https://login.tailscale.com/a/[^ ]*')
+            echo "{\"active\": \"未登录\", \"url\": \"$URL\", \"devices\": []}"
         else
             IP=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0] // "-"')
-            if [ "$IP" = "null" ]; then
-                IP="-"
-            fi
-            echo "{\"active\":\"运行中\",\"ip\":\"$IP\"}"
+            DEVICES=$(echo "$ST" | jq -c '.Peer | to_entries | map({hostname: .value.HostName, ip: (.value.TailscaleIPs[0] // "-"), online: .value.Online})')
+            echo "{\"active\": \"运行中\", \"ip\": \"$IP\", \"devices\": $DEVICES}"
         fi
-        ;;
-    *action=login*)
-        $TS up --accept-dns=false --reset >/dev/null 2>&1 &
-        echo '{"result":"ok"}'
         ;;
     *action=logout*)
         $TS logout >/dev/null 2>&1
-        echo '{"result":"ok"}'
-        ;;
-    *)
-        echo '{"error":"unknown action"}'
+        echo "{\"result\": \"ok\"}"
         ;;
 esac
