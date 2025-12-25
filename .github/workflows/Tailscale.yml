@@ -51,14 +51,16 @@ jobs:
           case "$QUERY_STRING" in
               *action=status*)
                   ST=$($TS status --json 2>/dev/null)
-                  if [ $? -ne 0 ] || [ -z "$ST" ]; then 
-                      echo "{\"active\": \"未运行\", \"ip\": \"-\", \"devices\": []}"
+                  STATE=$(echo "$ST" | jq -r '.BackendState // "未运行"')
+                  if [ "$STATE" != "Running" ]; then
+                      # 获取链接时增加超时保护，防止 CGI 挂起
+                      URL=$(timeout 3 $TS up --accept-dns=false --reset 2>&1 | grep -o 'https://login.tailscale.com/a/[^ ]*')
+                      echo "{\"active\": \"未登录\", \"url\": \"$URL\", \"devices\": []}"
                   else
                       IP=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0] // "-"')
-                      DEVICES=$(echo "$ST" | jq -c '.Peer | to_entries | map({hostname: .value.HostName, ip: (.value.TailscaleIPs[0] // "-"), os: (.value.OS // "-"), version: (.value.Version // "-"), online: .value.Online})')
+                      DEVICES=$(echo "$ST" | jq -c '.Peer | to_entries | map({hostname: .value.HostName, ip: (.value.TailscaleIPs[0] // "-"), online: .value.Online})')
                       echo "{\"active\": \"运行中\", \"ip\": \"$IP\", \"devices\": $DEVICES}"
                   fi ;;
-              *action=login*) $TS up --accept-dns=false --reset >/dev/null 2>&1 & echo "{\"result\": \"ok\"}" ;;
               *action=logout*) $TS logout >/dev/null 2>&1; echo "{\"result\": \"ok\"}" ;;
           esac
           EOF
@@ -70,50 +72,42 @@ jobs:
           <%+header%>
           <div class="cbi-map">
               <h2 style="margin-bottom:20px">Tailscale 控制面板</h2>
+              <div id="auth-box" style="display:none; background:#fffbe6; padding:15px; border:1px solid #ffe58f; border-radius:4px; margin-bottom:20px;">
+                  <strong style="color:#856404;">授权步骤：</strong>
+                  <ol>
+                      <li>点击下方蓝色链接进入官网。</li>
+                      <li>输入账号密码完成授权。</li>
+                      <li>完成后关闭官网窗口，回到本页面刷新即可。</li>
+                  </ol>
+                  <a id="auth-link" href="#" target="_blank" style="word-break:break-all; font-weight:bold; color:#1890ff; font-size:15px;">👉 点击此处进行授权</a>
+              </div>
               <div style="background:#fff; padding:15px; border:1px solid #ddd; border-radius:4px; margin-bottom:20px; display:flex; justify-content:space-between; align-items:center;">
-                  <div><strong>状态:</strong> <span id="st-txt">检测中...</span><br><small id="ip-txt" style="color:#888">地址: -</small></div>
-                  <div>
-                      <button class="cbi-button cbi-button-apply" onclick="doAct('login')">一键登录</button>
-                      <button class="cbi-button cbi-button-reset" onclick="doAct('logout')">注销</button>
-                  </div>
+                  <div><strong>状态:</strong> <span id="st-txt">同步中...</span><br><small id="ip-txt" style="color:#888">地址: -</small></div>
+                  <button class="cbi-button cbi-button-reset" onclick="fetch('/cgi-bin/tailscale_api?action=logout');location.reload();">断开并重置</button>
               </div>
               <table class="cbi-section-table" style="width:100%; table-layout:fixed; border:1px solid #eee;">
-                  <thead>
-                      <tr class="cbi-section-table-titles">
-                          <th class="cbi-section-table-cell" style="width:40%; text-align:left; padding:10px;">设备名称</th>
-                          <th class="cbi-section-table-cell" style="width:25%; text-align:left; padding:10px;">内网 IP</th>
-                          <th class="cbi-section-table-cell" style="width:20%; text-align:left; padding:10px;">系统/版本</th>
-                          <th class="cbi-section-table-cell" style="width:15%; text-align:left; padding:10px;">状态</th>
-                      </tr>
-                  </thead>
+                  <thead><tr class="cbi-section-table-titles"><th class="cbi-section-table-cell" style="width:40%; text-align:left; padding:10px;">设备</th><th class="cbi-section-table-cell" style="width:35%; text-align:left; padding:10px;">内网 IP</th><th class="cbi-section-table-cell" style="width:25%; text-align:left; padding:10px;">状态</th></tr></thead>
                   <tbody id="dev-list"></tbody>
               </table>
           </div>
           <script>
               function refresh() {
                   fetch('/cgi-bin/tailscale_api?action=status').then(r => r.json()).then(d => {
-                      const st = document.getElementById('st-txt');
-                      st.innerText = d.active;
-                      st.style.color = (d.active === "运行中") ? "#28a745" : "#ff4d4f";
+                      document.getElementById('st-txt').innerText = d.active;
+                      document.getElementById('st-txt').style.color = (d.active === "运行中") ? "#28a745" : "#ff4d4f";
                       document.getElementById('ip-txt').innerText = "地址: " + (d.ip || "-");
+                      if (d.active === "未登录" && d.url) {
+                          document.getElementById('auth-box').style.display = 'block';
+                          document.getElementById('auth-link').href = d.url;
+                      } else { document.getElementById('auth-box').style.display = 'none'; }
                       let h = '';
                       if(d.devices && d.devices.length > 0) {
                           d.devices.forEach(v => {
-                              h += '<tr class="cbi-section-table-row">' +
-                                   '<td style="padding:10px;"><strong>' + v.hostname + '</strong></td>' +
-                                   '<td style="padding:10px;"><code>' + v.ip + '</code></td>' +
-                                   '<td style="padding:10px; font-size:11px;">' + v.version + '<br>' + v.os + '</td>' +
-                                   '<td style="padding:10px;">' + (v.online ? '<span style="color:#28a745">● 在线</span>' : '<span style="color:#999">○ 离线</span>') + '</td>' +
-                                   '</tr>';
+                              h += '<tr class="cbi-section-table-row"><td style="padding:10px;"><strong>'+v.hostname+'</strong></td><td style="padding:10px;"><code>'+v.ip+'</code></td><td style="padding:10px;">'+(v.online ? '<span style="color:#28a745">● 在线</span>' : '<span style="color:#999">○ 离线</span>')+'</td></tr>';
                           });
-                      } else { h = '<tr><td colspan="4" style="text-align:center;padding:20px;color:#999;">等待登录或启动</td></tr>'; }
+                      } else { h = '<tr><td colspan="3" style="text-align:center;padding:20px;color:#999;">等待登录...</td></tr>'; }
                       document.getElementById('dev-list').innerHTML = h;
                   });
-              }
-              function doAct(a) { 
-                  if(a==='login') { window.open('https://login.tailscale.com/a/console'); }
-                  fetch('/cgi-bin/tailscale_api?action='+a); 
-                  setTimeout(refresh, 2000); 
               }
               refresh(); setInterval(refresh, 5000);
           </script>
