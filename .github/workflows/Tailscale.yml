@@ -34,7 +34,7 @@ jobs:
       - name: Package Tailscale into .run file
         run: |
           mkdir -p output
-          cp tailscale tailscaled ./tailscale-1.92.3/* ./tailscale-1.92.3/
+          cp -r tailscale tailscaled ./tailscale-1.92.3/* ./tailscale-1.92.3/
           makeself ./tailscale-1.92.3 output/tailscale-1.92.3.run "Tailscale Installer v1.92.3" ./install-tailscale.sh
 
       # Step 6: Upload .run file to GitHub Release
