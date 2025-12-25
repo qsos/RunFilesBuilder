@@ -1,21 +1,23 @@
 #!/bin/sh
 
-# 1. 安装二进制
+# 1. 安装二进制文件
 cp -f bin/tailscale /usr/sbin/tailscale
 cp -f bin/tailscaled /usr/sbin/tailscaled
 chmod +x /usr/sbin/tailscale /usr/sbin/tailscaled
 
-# 2. 安装 LuCI 界面文件
+# 2. 安装 LuCI 界面文件 (菜单和 HTML)
 mkdir -p /usr/lib/lua/luci/controller/
 mkdir -p /usr/lib/lua/luci/view/tailscale_web/
-cp -rf usr/lib/lua/luci/* /usr/lib/lua/luci/
+cp -f usr/lib/lua/luci/controller/tailscale_web.lua /usr/lib/lua/luci/controller/
+cp -f usr/lib/lua/luci/view/tailscale_web/index.htm /usr/lib/lua/luci/view/tailscale_web/
 
-# 3. 安装 API 后端 (重要：这步实现控制功能)
+# 3. 安装后端 API (这是解决“死界面”的关键)
 mkdir -p /www/cgi-bin
+# 这里的路径必须和 .yml 打包时的路径对应
 cp -f www/cgi-bin/tailscale_api /www/cgi-bin/tailscale_api
-chmod +x /www/cgi-bin/tailscale_api
+chmod 755 /www/cgi-bin/tailscale_api
 
-# 4. 设置服务自启
+# 4. 确保 tailscaled 核心服务在后台运行
 cat << 'EOF' > /etc/init.d/tailscale
 #!/bin/sh /etc/rc.common
 START=99
@@ -32,6 +34,6 @@ chmod +x /etc/init.d/tailscale
 /etc/init.d/tailscale enable
 /etc/init.d/tailscale restart
 
-# 清理缓存
+# 5. 清理 LuCI 缓存
 rm -rf /tmp/luci-indexcache /tmp/luci-modulecache/
-echo "安装成功！请刷新 OpenWrt 页面查看服务菜单。"
+echo "安装完成！"
