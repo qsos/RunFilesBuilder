@@ -41,14 +41,14 @@ jobs:
           mv tailscale_*/tailscaled staging/bin/
           rm -rf ts.tgz tailscale_*
 
-      - name: Create Backend API (修复控制与数据解析)
+      - name: Create Backend API (回退至初始可用版本逻辑)
         run: |
           cat << 'EOF' > staging/www/cgi-bin/tailscale_api
           #!/bin/sh
           echo "Content-type: application/json"
           echo ""
           
-          # 处理前端控制指令
+          # 还原最初证明可用的控制逻辑
           case "$QUERY_STRING" in
               *action=login*)
                   /usr/sbin/tailscale up --accept-dns=false --reset >/dev/null 2>&1 &
@@ -58,97 +58,81 @@ jobs:
                   echo "{\"result\": \"ok\"}" ; exit 0 ;;
           esac
 
-          # 获取状态并处理 null 数据
           ST=$(/usr/sbin/tailscale status --json 2>/dev/null)
-          if [ $? -ne 0 ] || [ -z "$ST" ]; then
-              echo "{\"active\": \"未运行\", \"ip\": \"-\", \"devices\": []}"
+          if [ $? -ne 0 ]; then
+              echo "{\"active\": \"未运行\"}"
           else
-              SELF_IP=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0] // "-"')
-              PEERS=$(echo "$ST" | jq -c '.Peer | to_entries | map({
+              IP=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0] // "-"')
+              # 只抓取必要的 4 项数据：名称、IP、系统、版本，不再抓取邮箱
+              DEVICES=$(echo "$ST" | jq -c '.Peer | to_entries | map({
                   name: .value.HostName,
                   ip: (.value.TailscaleIPs[0] // "-"),
-                  os: (.value.OS // "Linux"),
+                  os: (.value.OS // "-"),
                   ver: (.value.Version // "-"),
                   online: .value.Online
               })')
-              echo "{\"active\": \"运行中\", \"ip\": \"$SELF_IP\", \"devices\": $PEERS}"
+              echo "{\"active\": \"运行中\", \"ip\": \"$IP\", \"devices\": $DEVICES}"
           fi
           EOF
           chmod 755 staging/www/cgi-bin/tailscale_api
 
-      - name: Create UI (修复布局重叠与 ID 绑定)
+      - name: Create UI (回退逻辑，仅保留核心显示)
         run: |
           cat << 'EOF' > staging/usr/lib/lua/luci/view/tailscale_web/index.htm
           <%+header%>
           <div class="cbi-map">
-              <h2 style="margin-bottom: 20px;">Tailscale 控制面板</h2>
+              <h2 style="margin-bottom: 10px;">Tailscale 控制面板</h2>
               
-              <div style="background:#fff; padding:20px; border:1px solid #d9d9d9; border-radius:4px; margin-bottom:20px; display:flex; justify-content:space-between; align-items:center;">
+              <div class="cbi-section" style="background:#fff; padding:15px; border:1px solid #ddd; display:flex; justify-content:space-between; align-items:center;">
                   <div>
-                      <div style="font-size:16px; font-weight:bold;">服务状态: <span id="st-txt">读取中...</span></div>
-                      <div style="color:#888; font-size:13px; margin-top:5px;">内网地址: <span id="st-ip">-</span></div>
+                      <strong>状态:</strong> <span id="st-txt">-</span><br>
+                      <small>地址: <span id="st-ip">-</span></small>
                   </div>
                   <div>
-                      <button class="cbi-button cbi-button-apply" id="btn-login" onclick="doAct('login')">一键上线</button>
-                      <button class="cbi-button cbi-button-reset" id="btn-logout" onclick="doAct('logout')">注销退出</button>
+                      <button class="cbi-button cbi-button-apply" onclick="run_cmd('login')">登录上线</button>
+                      <button class="cbi-button cbi-button-reset" onclick="run_cmd('logout')">注销退出</button>
                   </div>
               </div>
 
               <div class="cbi-section">
-                  <table class="cbi-section-table" style="width:100%; background:#fff; border:1px solid #d9d9d9; table-layout: fixed;">
-                      <thead>
-                          <tr class="cbi-section-table-titles">
-                              <th class="cbi-section-table-cell" style="text-align:left; padding:12px; width:35%;">设备名称</th>
-                              <th class="cbi-section-table-cell" style="text-align:left; padding:12px; width:25%;">内网 IP</th>
-                              <th class="cbi-section-table-cell" style="text-align:left; padding:12px; width:20%;">版本 / 系统</th>
-                              <th class="cbi-section-table-cell" style="text-align:left; padding:12px; width:20%;">状态</th>
-                          </tr>
-                      </thead>
-                      <tbody id="dev-list">
-                          <tr><td colspan="4" style="text-align:center; padding:30px; color:#999;">正在连接服务...</td></tr>
-                      </tbody>
+                  <table class="cbi-section-table" style="width:100%; table-layout:fixed;">
+                      <tr class="cbi-section-table-titles">
+                          <th class="cbi-section-table-cell">设备名称</th>
+                          <th class="cbi-section-table-cell">内网 IP</th>
+                          <th class="cbi-section-table-cell">系统 / 版本</th>
+                          <th class="cbi-section-table-cell">在线状态</th>
+                      </tr>
+                      <tbody id="dev-list"></tbody>
                   </table>
               </div>
           </div>
 
           <script>
-              function refresh() {
-                  fetch(window.location.origin + '/cgi-bin/tailscale_api').then(r => r.json()).then(d => {
-                      const txt = document.getElementById('st-txt');
-                      txt.innerText = d.active || "未运行";
-                      txt.style.color = (d.active === "运行中") ? "#52c41a" : "#ff4d4f";
+              function update() {
+                  fetch('/cgi-bin/tailscale_api').then(r => r.json()).then(d => {
+                      document.getElementById('st-txt').innerText = d.active || "未运行";
+                      document.getElementById('st-txt').style.color = (d.active === "运行中") ? "green" : "red";
                       document.getElementById('st-ip').innerText = d.ip || "-";
 
-                      const tbody = document.getElementById('dev-list');
-                      tbody.innerHTML = '';
-                      if(d.devices && d.devices.length > 0) {
-                          d.devices.forEach(dev => {
-                              tbody.innerHTML += `
-                                  <tr class="cbi-section-table-row">
-                                      <td style="padding:12px; overflow:hidden; text-overflow:ellipsis;"><strong>${dev.name}</strong></td>
-                                      <td style="padding:12px;"><code>${dev.ip}</code></td>
-                                      <td style="padding:12px; font-size:12px;">${dev.ver}<br><span style="color:#999;">${dev.os}</span></td>
-                                      <td style="padding:12px;">
-                                          <span style="width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:8px; background:${dev.online?'#52c41a':'#bfbfbf'}"></span>
-                                          ${dev.online ? '在线' : '离线'}
-                                      </td>
-                                  </tr>`;
+                      let html = '';
+                      if(d.devices) {
+                          d.devices.forEach(v => {
+                              html += `<tr class="cbi-section-table-row">
+                                  <td><strong>${v.name}</strong></td>
+                                  <td>${v.ip}</td>
+                                  <td>${v.os}<br><small>${v.ver}</small></td>
+                                  <td>${v.online ? '<span style="color:green">● 在线</span>' : '<span style="color:gray">○ 离线</span>'}</td>
+                              </tr>`;
                           });
-                      } else {
-                          tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:30px; color:#999;">无节点信息</td></tr>';
                       }
+                      document.getElementById('dev-list').innerHTML = html || '<tr><td colspan="4" style="text-align:center">无设备</td></tr>';
                   });
               }
-
-              function doAct(a) {
-                  const b = event.target; b.disabled = true;
-                  fetch(window.location.origin + '/cgi-bin/tailscale_api?action=' + a).then(() => {
-                      setTimeout(() => { b.disabled = false; refresh(); }, 2500);
-                  });
+              function run_cmd(a) {
+                  fetch('/cgi-bin/tailscale_api?action=' + a).then(() => setTimeout(update, 2000));
               }
-
-              refresh();
-              setInterval(refresh, 8000);
+              update();
+              setInterval(update, 5000);
           </script>
           <%+footer%>
           EOF
@@ -158,7 +142,7 @@ jobs:
           cat << 'EOF' > staging/usr/lib/lua/luci/controller/tailscale_web.lua
           module("luci.controller.tailscale_web", package.seeall)
           function index()
-              entry({"admin", "services", "tailscale_web"}, template("tailscale_web/index"), _("Tailscale 控制台"), 99)
+              entry({"admin", "services", "tailscale_web"}, template("tailscale_web/index"), _("Tailscale"), 99)
           end
           EOF
 
@@ -168,7 +152,7 @@ jobs:
           chmod +x staging/install.sh
           makeself --notemp staging "tailscale-${{ steps.v.outputs.tag }}-x86.run" "Tailscale" ./install.sh
 
-      - name: Create Release (修复项目命名)
+      - name: Create Release (参照 PassWall 命名)
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "v${{ steps.v.outputs.tag }}"
