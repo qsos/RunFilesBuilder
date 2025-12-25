@@ -1,1 +1,32 @@
+#!/bin/sh
 
+echo "Content-Type: application/json"
+echo ""
+
+TS="/bin/tailscale"
+
+case "$QUERY_STRING" in
+    *action=status*)
+        ST="$($TS status --json 2>/dev/null)"
+        if [ -z "$ST" ]; then
+            echo '{"active":"未运行","ip":"-"}'
+        else
+            IP=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0] // "-"')
+            if [ "$IP" = "null" ]; then
+                IP="-"
+            fi
+            echo "{\"active\":\"运行中\",\"ip\":\"$IP\"}"
+        fi
+        ;;
+    *action=login*)
+        $TS up --accept-dns=false --reset >/dev/null 2>&1 &
+        echo '{"result":"ok"}'
+        ;;
+    *action=logout*)
+        $TS logout >/dev/null 2>&1
+        echo '{"result":"ok"}'
+        ;;
+    *)
+        echo '{"error":"unknown action"}'
+        ;;
+esac
