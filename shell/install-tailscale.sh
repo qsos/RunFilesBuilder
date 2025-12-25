@@ -1,13 +1,11 @@
 #!/bin/sh
 
-echo "== Installing Tailscale core =="
+echo "Installing Tailscale core..."
 
-INSTALL_DIR=/usr/sbin
+cp tailscale /usr/sbin/tailscale
+cp tailscaled /usr/sbin/tailscaled
 
-cp tailscale "$INSTALL_DIR/tailscale"
-cp tailscaled "$INSTALL_DIR/tailscaled"
-
-chmod +x "$INSTALL_DIR/tailscale" "$INSTALL_DIR/tailscaled"
+chmod +x /usr/sbin/tailscale /usr/sbin/tailscaled
 
 if [ ! -f /etc/init.d/tailscale ]; then
 cat >/etc/init.d/tailscale <<'EOF'
@@ -16,7 +14,6 @@ START=95
 STOP=10
 
 start() {
-    echo "Starting tailscaled..."
     /usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state &
 }
 
@@ -30,7 +27,4 @@ fi
 
 /etc/init.d/tailscale start
 
-echo
-echo "Tailscale installed."
-echo "Run this in LuCI or SSH once to login:"
-echo "tailscale up"
+echo "Tailscale installed. Run: tailscale up"
