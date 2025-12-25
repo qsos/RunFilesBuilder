@@ -55,7 +55,7 @@ jobs:
           <%+header%>
           <div class="cbi-map">
               <h2 style="margin-bottom:20px">Tailscale 控制面板</h2>
-              <div style="background:#fff; padding:15px; border:1px solid #ddd; border-radius:4px; display:flex; justify-content:space-between; align-items:center;">
+              <div style="background:#fff; padding:15px; border:1px solid #ddd; border-radius:4px; margin-bottom:20px; display:flex; justify-content:space-between; align-items:center;">
                   <div><strong>状态:</strong> <span id="st-txt">检测中...</span><br><small id="ip-txt">地址: -</small></div>
                   <div>
                       <button class="cbi-button cbi-button-apply" onclick="doAct('login')">一键登录按钮</button>
@@ -69,6 +69,8 @@ jobs:
                       document.getElementById('st-txt').innerText = d.active;
                       document.getElementById('st-txt').style.color = (d.active === "运行中") ? "green" : "red";
                       document.getElementById('ip-txt').innerText = "地址: " + (d.ip || "-");
+                  }).catch(() => {
+                      document.getElementById('st-txt').innerText = "404 错误: 接口未就绪";
                   });
               }
               function doAct(a) { 
