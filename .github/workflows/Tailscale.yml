@@ -7,13 +7,11 @@
           TS="/bin/tailscale"
           case "$QUERY_STRING" in
               *action=status*)
-                  # 增加 2 秒超时，防止网页死锁
                   ST=$(timeout 2 $TS status --json 2>/dev/null)
                   STATE=$(echo "$ST" | jq -r '.BackendState // "未运行"')
                   if [ "$STATE" != "Running" ]; then
-                      # 异步获取 URL，如果 3 秒拿不到就返回空，让网页稍后重试
-                      URL=$(timeout 3 $TS up --accept-dns=false --reset 2>&1 | grep -o 'https://login.tailscale.com/a/[^ ]*' | head -n 1)
-                      echo "{\"active\": \"未登录\", \"url\": \"$URL\", \"devices\": []}"
+                      URL=$(timeout 2 $TS up --accept-dns=false --reset 2>&1 | grep -o 'https://login.tailscale.com/a/[^ ]*' | head -n 1)
+                      echo "{\"active\": \"未登录\", \"url\": \"$URL\"}"
                   else
                       IP=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0] // "-"')
                       DEVICES=$(echo "$ST" | jq -c '.Peer | to_entries | map({hostname: .value.HostName, ip: (.value.TailscaleIPs[0] // "-"), online: .value.Online})')
@@ -30,69 +28,43 @@
           <%+header%>
           <div class="cbi-map">
               <h2 style="margin-bottom:20px">Tailscale 控制面板</h2>
-              
               <div id="auth-box" style="display:none; background:#fffbe6; padding:20px; border:1px solid #ffe58f; border-radius:4px; margin-bottom:20px; text-align:center;">
-                  <strong style="color:#856404; font-size:16px;">⚠️ 需要授权登录</strong>
-                  <p id="auth-msg" style="margin:10px 0;">正在生成授权链接，请稍候...</p>
-                  <a id="auth-btn" href="#" target="_blank" style="display:none; padding:12px 24px; background:#1890ff; color:#fff; border-radius:4px; text-decoration:none; font-weight:bold;">👉 点击前往官网授权 👈</a>
+                  <strong style="color:#856404;">需要授权：</strong>
+                  <p id="auth-msg">正在准备链接...</p>
+                  <a id="auth-btn" href="#" target="_blank" style="display:none; padding:10px 20px; background:#1890ff; color:#fff; border-radius:4px; text-decoration:none; font-weight:bold;">👉 点击前往官网授权</a>
               </div>
-
               <div style="background:#fff; padding:15px; border:1px solid #ddd; border-radius:4px; margin-bottom:20px; display:flex; justify-content:space-between; align-items:center;">
-                  <div><strong>服务状态:</strong> <span id="st-txt">初始化...</span><br><small id="ip-txt" style="color:#888">地址: -</small></div>
-                  <button class="cbi-button cbi-button-reset" onclick="doLogout()">重置服务</button>
+                  <div><strong>状态:</strong> <span id="st-txt">初始化...</span><br><small id="ip-txt">地址: -</small></div>
+                  <button class="cbi-button cbi-button-reset" onclick="doAct('logout')">重置/注销</button>
               </div>
-
               <table class="cbi-section-table" style="width:100%; table-layout:fixed; border:1px solid #eee;">
-                  <thead><tr class="cbi-section-table-titles"><th class="cbi-section-table-cell" style="width:40%; text-align:left; padding:10px;">设备名称</th><th class="cbi-section-table-cell" style="width:35%; text-align:left; padding:10px;">内网 IP</th><th class="cbi-section-table-cell" style="width:25%; text-align:left; padding:10px;">状态</th></tr></thead>
+                  <thead><tr class="cbi-section-table-titles"><th class="cbi-section-table-cell" style="padding:10px;">设备名称</th><th class="cbi-section-table-cell" style="padding:10px;">IP/状态</th></tr></thead>
                   <tbody id="dev-list"></tbody>
               </table>
           </div>
-
           <script>
-              function doLogout() {
-                  if(confirm('确定要重置并注销吗？')) {
-                      fetch('/cgi-bin/tailscale_api?action=logout').then(() => location.reload());
-                  }
-              }
-
+              function doAct(a){ fetch('/cgi-bin/tailscale_api?action='+a).then(()=>location.reload()); }
               function refresh() {
-                  fetch('/cgi-bin/tailscale_api?action=status')
-                  .then(r => r.json())
-                  .then(d => {
-                      const st = document.getElementById('st-txt');
-                      const abox = document.getElementById('auth-box');
-                      const amsg = document.getElementById('auth-msg');
-                      const abtn = document.getElementById('auth-btn');
-                      
-                      st.innerText = d.active;
-                      st.style.color = (d.active === "运行中") ? "#28a745" : "#ff4d4f";
+                  fetch('/cgi-bin/tailscale_api?action=status').then(r => r.json()).then(d => {
+                      document.getElementById('st-txt').innerText = d.active;
+                      document.getElementById('st-txt').style.color = (d.active === "运行中") ? "#28a745" : "#ff4d4f";
                       document.getElementById('ip-txt').innerText = "地址: " + (d.ip || "-");
-
                       if (d.active === "未登录") {
-                          abox.style.display = 'block';
-                          if (d.url) {
-                              abtn.href = d.url;
-                              abtn.style.display = 'inline-block';
-                              amsg.innerText = "授权链接已就绪，请点击下方按钮完成登录：";
-                          } else {
-                              abtn.style.display = 'none';
-                              amsg.innerText = "正在获取最新授权链接，请稍等 (约5-10秒)...";
-                          }
-                      } else {
-                          abox.style.display = 'none';
-                      }
-
+                          document.getElementById('auth-box').style.display = 'block';
+                          if(d.url){ 
+                              document.getElementById('auth-btn').style.display='inline-block'; 
+                              document.getElementById('auth-btn').href=d.url;
+                              document.getElementById('auth-msg').innerText="请点击下方按钮登录：";
+                          } else { document.getElementById('auth-msg').innerText="正在获取授权链接..."; }
+                      } else { document.getElementById('auth-box').style.display = 'none'; }
                       let h = '';
                       if(d.devices && d.devices.length > 0) {
                           d.devices.forEach(v => {
-                              h += '<tr class="cbi-section-table-row"><td style="padding:10px;"><strong>'+v.hostname+'</strong></td><td style="padding:10px;"><code>'+v.ip+'</code></td><td style="padding:10px;">'+(v.online ? '<span style="color:#28a745">● 在线</span>' : '<span style="color:#999">○ 离线</span>')+'</td></tr>';
+                              h += '<tr class="cbi-section-table-row"><td style="padding:10px;"><strong>'+v.hostname+'</strong></td><td style="padding:10px;"><code>'+v.ip+'</code> '+(v.online?'在线':'离线')+'</td></tr>';
                           });
-                      } else { h = '<tr><td colspan="3" style="text-align:center;padding:20px;color:#999;">'+(d.active === "运行中" ? "当前账号下暂无其他节点" : "等待登录完成后显示列表")+'</td></tr>'; }
+                      } else { h = '<tr><td colspan="2" style="text-align:center;padding:20px;color:#999;">等待数据...</td></tr>'; }
                       document.getElementById('dev-list').innerHTML = h;
-                  })
-                  .catch(e => {
-                      document.getElementById('st-txt').innerText = "API 响应缓慢，重试中...";
-                  });
+                  }).catch(()=> { document.getElementById('st-txt').innerText="后台启动中..."; });
               }
               refresh(); setInterval(refresh, 5000);
           </script>
