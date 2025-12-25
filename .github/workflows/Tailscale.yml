@@ -1,4 +1,4 @@
-name: Build Tailscale Advanced Console
+name: Build Tailscale iStoreOS Style Console
 
 on:
   workflow_dispatch:
@@ -35,13 +35,11 @@ jobs:
         id: meta
         run: |
           if [ -z "${{ github.event.inputs.version }}" ]; then
-            # 自动获取官方最新版本号
             VERSION=$(curl -sL https://api.github.com/repos/tailscale/tailscale/releases/latest | jq -r ".tag_name" | sed 's/v//')
           else
             VERSION=${{ github.event.inputs.version }}
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Building Tailscale Version: $VERSION"
 
       - name: Download and Prepare Staging
         run: |
@@ -65,11 +63,18 @@ jobs:
                   if [ $? -ne 0 ]; then
                       echo "{\"active\": \"Stopped\"}"
                   else
-                      BACKEND=$(echo "$ST" | jq -r '.BackendState')
-                      IP=$(echo "$ST" | jq -r '.TailscaleIPs[0] // "-"')
-                      AUTH=$(echo "$ST" | jq -r '.AuthURL // ""')
-                      DEVICES=$(echo "$ST" | jq -c '.Peer | to_entries | map({hostname: .value.HostName, ip: .value.TailscaleIPs[0], os: .value.OS, online: .value.Online})')
-                      echo "{\"active\": \"$BACKEND\", \"ip\": \"$IP\", \"url\": \"$AUTH\", \"devices\": $DEVICES}"
+                      USER=$(echo "$ST" | jq -r '.Self.User')
+                      MAIL=$(echo "$ST" | jq -r ".User[\"$USER\"].LoginName // \"未登录\"")
+                      IP=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0]')
+                      DEVICES=$(echo "$ST" | jq -c '.Peer | to_entries | map({
+                          hostname: .value.HostName,
+                          ip: .value.TailscaleIPs[0],
+                          os: .value.OS,
+                          version: .value.Version,
+                          online: .value.Online,
+                          expiry: (if .value.KeyExpiryDisabled then "disabled" else "enabled" end)
+                      })')
+                      echo "{\"active\": \"Running\", \"ip\": \"$IP\", \"mail\": \"$MAIL\", \"devices\": $DEVICES}"
                   fi
                   ;;
               *action=login*)
@@ -80,115 +85,75 @@ jobs:
                   /usr/sbin/tailscale logout >/dev/null 2>&1
                   echo "{\"result\": \"success\"}"
                   ;;
-              *action=expiry_on*)
-                  /usr/sbin/tailscale up --reset --reset-node-key >/dev/null 2>&1 &
-                  echo "{\"result\": \"expiry_reset\"}"
-                  ;;
               *action=subnet_on*)
-                  LAN_NET=$(uci get network.lan.ipaddr | cut -d. -f1-3).0/24
-                  /usr/sbin/tailscale up --advertise-routes=$LAN_NET --reset >/dev/null 2>&1 &
-                  echo "{\"result\": \"subnet_enabled\", \"route\": \"$LAN_NET\"}"
+                  LAN=$(uci get network.lan.ipaddr | cut -d. -f1-3).0/24
+                  /usr/sbin/tailscale up --advertise-routes=$LAN --reset >/dev/null 2>&1 &
+                  echo "{\"result\": \"success\"}"
                   ;;
               *action=subnet_off*)
                   /usr/sbin/tailscale up --advertise-routes= --reset >/dev/null 2>&1 &
-                  echo "{\"result\": \"subnet_disabled\"}"
+                  echo "{\"result\": \"success\"}"
+                  ;;
+              *action=expiry_toggle*)
+                  /usr/sbin/tailscale up --reset-node-key >/dev/null 2>&1 &
+                  echo "{\"result\": \"success\"}"
                   ;;
           esac
           EOF
           chmod 755 staging/www/cgi-bin/tailscale_api
 
-      - name: Create Console UI
+      - name: Create Console UI (iStoreOS Style)
         run: |
           cat << 'EOF' > staging/usr/lib/lua/luci/view/tailscale_web/index.htm
           <%+header%>
+          <style>
+              .ts-info-bar { margin-bottom: 15px; padding: 10px; background: #f4f4f4; border: 1px solid #ddd; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; }
+              .status-on { color: green; font-weight: bold; }
+              .status-off { color: #999; }
+              .m-mail { color: #666; font-size: 0.9em; display: block; }
+              .tag { background: #eee; padding: 1px 4px; border-radius: 3px; font-size: 11px; color: #666; margin-right: 4px; border: 1px solid #ccc; }
+              .tag-blue { background: #e6f7ff; color: #1890ff; border-color: #91d5ff; }
+              .drop-btn { cursor: pointer; padding: 2px 8px; border: 1px solid #ccc; background: #fff; border-radius: 4px; }
+              .drop-menu { display: none; position: absolute; background: #fff; min-width: 150px; border: 1px solid #ccc; box-shadow: 0 2px 10px rgba(0,0,0,0.1); z-index: 999; right: 20px; }
+              .drop-menu a { display: block; padding: 8px 12px; text-decoration: none; color: #333; font-size: 13px; border-bottom: 1px solid #eee; }
+              .drop-menu a:hover { background: #f0f0f0; }
+              .show { display: block; }
+          </style>
+
           <div class="cbi-map">
-              <h2 name="content">Tailscale 高级控制台</h2>
-              <fieldset class="cbi-section">
-                  <legend>系统状态</legend>
-                  <div style="padding:15px; background:#f4f4f4; border:1px solid #ccc;">
-                      <p>节点状态: <b id="ts-status">获取中...</b> | 我的 IP: <b id="ts-ip">-</b></p>
-                      <div style="margin-top:10px;">
-                          <button class="cbi-button cbi-button-apply" onclick="doAct('login')">登录上线</button>
-                          <button class="cbi-button cbi-button-reset" onclick="doAct('logout')">完全退出</button>
-                          <button class="cbi-button" onclick="doAct('subnet_on')">开启子网</button>
-                          <button class="cbi-button" onclick="doAct('subnet_off')">关闭子网</button>
-                          <button class="cbi-button" onclick="doAct('expiry_on')">强制过期</button>
-                      </div>
-                      <div id="login-box" style="display:none; margin-top:10px; color: red;">
-                          授权链接: <a id="ts-url" href="#" target="_blank">点击此处登录</a>
-                      </div>
+              <h2 name="content">Tailscale 交互控制台</h2>
+              
+              <div class="ts-info-bar">
+                  <div>
+                      <strong>当前账号:</strong> <span id="self-mail">加载中...</span>
+                      <span id="self-ip" style="margin-left:15px; color:#666;">IP: -</span>
                   </div>
-              </fieldset>
+                  <div>
+                      <button class="cbi-button cbi-button-apply" onclick="doAct('login')">登录</button>
+                      <button class="cbi-button cbi-button-reset" onclick="doAct('logout')">注销</button>
+                  </div>
+              </div>
+
+              <div id="login-link-box" style="display:none; padding:10px; background:#fffbe6; border:1px solid #ffe58f; margin-bottom:15px;">
+                  ⚠️ 需授权: <a id="ts-url" href="#" target="_blank" style="font-weight:bold;">点击登录</a>
+              </div>
+
               <fieldset class="cbi-section">
-                  <legend>网络设备列表</legend>
-                  <table style="width:100%; border-collapse:collapse;" id="dev-table">
-                      <thead>
-                          <tr style="background:#eee; text-align:left;">
-                              <th style="padding:8px; border:1px solid #ddd;">名称</th>
-                              <th style="padding:8px; border:1px solid #ddd;">IP</th>
-                              <th style="padding:8px; border:1px solid #ddd;">系统</th>
-                              <th style="padding:8px; border:1px solid #ddd;">状态</th>
-                          </tr>
-                      </thead>
-                      <tbody></tbody>
+                  <legend>设备列表</legend>
+                  <table class="cbi-section-table" id="dev-table">
+                      <tr class="cbi-section-table-titles">
+                          <th class="cbi-section-table-cell">MACHINE</th>
+                          <th class="cbi-section-table-cell">ADDRESSES</th>
+                          <th class="cbi-section-table-cell">VERSION</th>
+                          <th class="cbi-section-table-cell">LAST SEEN</th>
+                          <th class="cbi-section-table-cell"></th>
+                      </tr>
                   </table>
               </fieldset>
           </div>
+
           <script>
               function refresh() {
                   fetch('/cgi-bin/tailscale_api?action=status').then(r => r.json()).then(d => {
-                      document.getElementById('ts-status').innerText = d.active;
-                      document.getElementById('ts-status').style.color = d.active === "Running" ? "green" : "red";
-                      document.getElementById('ts-ip').innerText = d.ip;
-                      if(d.url) {
-                          document.getElementById('login-box').style.display = 'block';
-                          document.getElementById('ts-url').href = d.url;
-                      } else {
-                          document.getElementById('login-box').style.display = 'none';
-                      }
-                      const tbody = document.querySelector('#dev-table tbody');
-                      tbody.innerHTML = '';
-                      if(d.devices) {
-                          d.devices.forEach(dev => {
-                              tbody.innerHTML += `<tr>
-                                  <td style="padding:8px; border:1px solid #ddd;">${dev.hostname}</td>
-                                  <td style="padding:8px; border:1px solid #ddd;">${dev.ip}</td>
-                                  <td style="padding:8px; border:1px solid #ddd;">${dev.os}</td>
-                                  <td style="padding:8px; border:1px solid #ddd; color:${dev.online?'green':'#999'}">${dev.online?'● 在线':'○ 离线'}</td>
-                              </tr>`;
-                          });
-                      }
-                  });
-              }
-              function doAct(a) { fetch('/cgi-bin/tailscale_api?action=' + a); setTimeout(refresh, 3000); }
-              setInterval(refresh, 8000); refresh();
-          </script>
-          <%+footer%>
-          EOF
-
-      - name: Create LuCI Controller
-        run: |
-          cat << 'EOF' > staging/usr/lib/lua/luci/controller/tailscale_web.lua
-          module("luci.controller.tailscale_web", package.seeall)
-          function index()
-              entry({"admin", "services", "tailscale_web"}, template("tailscale_web/index"), _("Tailscale Console"), 99)
-          end
-          EOF
-
-      - name: Final Build
-        run: |
-          VERSION=${{ steps.meta.outputs.version }}
-          ARCH_NAME=${{ matrix.output_name }}
-          cp shell/install-tailscale.sh staging/install.sh
-          chmod +x staging/install.sh
-          # 关键修改：文件名现在包含版本号
-          makeself --notemp staging "tailscale-${VERSION}-${ARCH_NAME}.run" "Tailscale ${VERSION} Console" ./install.sh
-
-      - name: Upload Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: "v${{ steps.meta.outputs.version }}"
-          name: "Tailscale v${{ steps.meta.outputs.version }} Console"
-          files: "tailscale-*.run"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                      document.getElementById('self-mail').innerText = d.mail || "未登录";
+                      document.getElementById('self-ip').innerText =
