@@ -1,11 +1,10 @@
 #!/bin/sh
-# 彻底清理残留
+# 1. 彻底暴力清理
 killall -9 tailscale tailscaled 2>/dev/null
 /etc/init.d/tailscaled stop 2>/dev/null
-# 清除旧的认证文件，确保生成的是全新链接
 rm -rf /etc/tailscale/tailscaled.state
 
-# 重新安装
+# 2. 重新分发所有文件
 mkdir -p /bin /www/cgi-bin /usr/lib/lua/luci/view/tailscale_web
 cp -f bin/tailscale* /bin/
 cp -f www/cgi-bin/tailscale_api /www/cgi-bin/
@@ -13,7 +12,7 @@ cp -f usr/lib/lua/luci/controller/tailscale_web.lua /usr/lib/lua/luci/controller
 cp -f usr/lib/lua/luci/view/tailscale_web/index.htm /usr/lib/lua/luci/view/tailscale_web/
 chmod +x /bin/tailscale* /www/cgi-bin/tailscale_api
 
-# 写入自启动脚本
+# 3. 写入标准自启动脚本
 cat << 'EOF' > /etc/init.d/tailscaled
 #!/bin/sh /etc/rc.common
 START=99
