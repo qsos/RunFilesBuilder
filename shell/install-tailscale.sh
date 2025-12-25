@@ -1,21 +1,19 @@
 #!/bin/sh
-
-# 1. 暴力清理旧进程
+# 彻底清理残留
 killall -9 tailscale tailscaled 2>/dev/null
 /etc/init.d/tailscaled stop 2>/dev/null
+# 清除旧的认证文件，确保生成的是全新链接
+rm -rf /etc/tailscale/tailscaled.state
 
-# 2. 强行分发文件 (覆盖所有可能路径)
-mkdir -p /bin /usr/sbin /www/cgi-bin /usr/lib/lua/luci/view/tailscale_web
-cp -f bin/tailscale /bin/tailscale
-cp -f bin/tailscaled /bin/tailscaled
-cp -f bin/tailscale /usr/sbin/tailscale
-cp -f bin/tailscaled /usr/sbin/tailscaled
+# 重新安装
+mkdir -p /bin /www/cgi-bin /usr/lib/lua/luci/view/tailscale_web
+cp -f bin/tailscale* /bin/
 cp -f www/cgi-bin/tailscale_api /www/cgi-bin/
 cp -f usr/lib/lua/luci/controller/tailscale_web.lua /usr/lib/lua/luci/controller/
 cp -f usr/lib/lua/luci/view/tailscale_web/index.htm /usr/lib/lua/luci/view/tailscale_web/
-chmod +x /bin/tailscale* /usr/sbin/tailscale* /www/cgi-bin/tailscale_api
+chmod +x /bin/tailscale* /www/cgi-bin/tailscale_api
 
-# 3. 核心修复：重写服务的自启动脚本，确保路径 100% 正确
+# 写入自启动脚本
 cat << 'EOF' > /etc/init.d/tailscaled
 #!/bin/sh /etc/rc.common
 START=99
@@ -28,10 +26,6 @@ start_service() {
 }
 EOF
 chmod +x /etc/init.d/tailscaled
-
-# 4. 立即激活并后台启动 (解决你现在的“连接中”问题)
 /etc/init.d/tailscaled enable
 /etc/init.d/tailscaled start
 rm -rf /tmp/luci-*
-
-echo "Success! Please refresh your browser."
