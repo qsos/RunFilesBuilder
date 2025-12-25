@@ -37,12 +37,11 @@ jobs:
           case "$QUERY_STRING" in
               *action=status*)
                   ST=$($TS status --json 2>/dev/null)
-                  if [ $? -ne 0 ] || [ -z "$ST" ]; then 
-                      echo "{\"active\": \"未运行\", \"ip\": \"-\", \"devices\": []}"
+                  if [ -z "$ST" ]; then
+                      echo "{\"active\": \"未运行\", \"ip\": \"-\"}"
                   else
                       IP=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0] // "-"')
-                      DEVICES=$(echo "$ST" | jq -c '.Peer | to_entries | map({hostname: .value.HostName, ip: (.value.TailscaleIPs[0] // "-"), online: .value.Online})')
-                      echo "{\"active\": \"运行中\", \"ip\": \"$IP\", \"devices\": $DEVICES}"
+                      echo "{\"active\": \"运行中\", \"ip\": \"$IP\"}"
                   fi ;;
               *action=login*) $TS up --accept-dns=false --reset >/dev/null 2>&1 & echo "{\"result\": \"ok\"}" ;;
               *action=logout*) $TS logout >/dev/null 2>&1; echo "{\"result\": \"ok\"}" ;;
@@ -56,31 +55,20 @@ jobs:
           <%+header%>
           <div class="cbi-map">
               <h2 style="margin-bottom:20px">Tailscale 控制面板</h2>
-              <div style="background:#fff; padding:15px; border:1px solid #ddd; border-radius:4px; margin-bottom:20px; display:flex; justify-content:space-between; align-items:center;">
-                  <div><strong>状态:</strong> <span id="st-txt">检测中...</span><br><small id="ip-txt" style="color:#888">地址: -</small></div>
+              <div style="background:#fff; padding:15px; border:1px solid #ddd; border-radius:4px; display:flex; justify-content:space-between; align-items:center;">
+                  <div><strong>状态:</strong> <span id="st-txt">检测中...</span><br><small id="ip-txt">地址: -</small></div>
                   <div>
-                      <button class="cbi-button cbi-button-apply" onclick="doAct('login')">一键登录</button>
+                      <button class="cbi-button cbi-button-apply" onclick="doAct('login')">一键登录按钮</button>
                       <button class="cbi-button cbi-button-reset" onclick="doAct('logout')">注销</button>
                   </div>
               </div>
-              <table class="cbi-section-table" style="width:100%; border:1px solid #eee;">
-                  <thead><tr class="cbi-section-table-titles"><th class="cbi-section-table-cell" style="padding:10px;">设备名称</th><th class="cbi-section-table-cell" style="padding:10px;">内网 IP</th><th class="cbi-section-table-cell" style="padding:10px;">状态</th></tr></thead>
-                  <tbody id="dev-list"></tbody>
-              </table>
           </div>
           <script>
               function refresh() {
                   fetch('/cgi-bin/tailscale_api?action=status').then(r => r.json()).then(d => {
                       document.getElementById('st-txt').innerText = d.active;
-                      document.getElementById('st-txt').style.color = (d.active === "运行中") ? "#28a745" : "#ff4d4f";
+                      document.getElementById('st-txt').style.color = (d.active === "运行中") ? "green" : "red";
                       document.getElementById('ip-txt').innerText = "地址: " + (d.ip || "-");
-                      let h = '';
-                      if(d.devices && d.devices.length > 0) {
-                          d.devices.forEach(v => {
-                              h += '<tr><td style="padding:10px;">'+v.hostname+'</td><td style="padding:10px;">'+v.ip+'</td><td style="padding:10px;">'+(v.online?'在线':'离线')+'</td></tr>';
-                          });
-                      } else { h = '<tr><td colspan="3" style="text-align:center;padding:20px;color:#999;">等待登录</td></tr>'; }
-                      document.getElementById('dev-list').innerHTML = h;
                   });
               }
               function doAct(a) { 
