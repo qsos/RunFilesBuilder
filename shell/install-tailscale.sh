@@ -1,30 +1,17 @@
-#!/bin/sh
+#!/bin/bash
 
-echo "Installing Tailscale core..."
+# Install Tailscale on the system
+echo "Starting installation of Tailscale..."
 
-cp tailscale /usr/sbin/tailscale
-cp tailscaled /usr/sbin/tailscaled
+# Copy binaries to /usr/sbin
+cp tailscale /usr/sbin/
+cp tailscaled /usr/sbin/
 
+# Make the binaries executable
 chmod +x /usr/sbin/tailscale /usr/sbin/tailscaled
 
-if [ ! -f /etc/init.d/tailscale ]; then
-cat >/etc/init.d/tailscale <<'EOF'
-#!/bin/sh /etc/rc.common
-START=95
-STOP=10
+# Start Tailscale service
+tailscaled &
 
-start() {
-    /usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state &
-}
-
-stop() {
-    killall tailscaled 2>/dev/null
-}
-EOF
-chmod +x /etc/init.d/tailscale
-/etc/init.d/tailscale enable
-fi
-
-/etc/init.d/tailscale start
-
-echo "Tailscale installed. Run: tailscale up"
+# Inform user that the installation is complete
+echo "Tailscale installation complete."
