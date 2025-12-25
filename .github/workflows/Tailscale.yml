@@ -14,127 +14,40 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare Tools
-        run: sudo apt-get update && sudo apt-get install -y makeself jq curl
-
-      - name: Download Tailscale
+      - name: Install build tools
         run: |
-          VERSION=$(curl -sL https://api.github.com/repos/tailscale/tailscale/releases/latest | jq -r ".tag_name" | sed 's/v//')
-          curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${VERSION}_amd64.tgz" -o ts.tgz
-          tar xzf ts.tgz
+          sudo apt-get update
+          sudo apt-get install -y curl jq makeself
+
+      - name: Download Tailscale binary
+        run: |
+          VERSION=$(curl -sL https://api.github.com/repos/tailscale/tailscale/releases/latest \
+            | jq -r '.tag_name' | sed 's/^v//')
+
+          echo "Tailscale version: $VERSION"
+
+          curl -fsSL https://pkgs.tailscale.com/stable/tailscale_${VERSION}_amd64.tgz -o tailscale.tgz
+          tar xzf tailscale.tgz
 
           mkdir -p staging/bin
-          mkdir -p staging/www/cgi-bin
-          mkdir -p staging/usr/lib/lua/luci/controller
-          mkdir -p staging/usr/lib/lua/luci/view/tailscale_web
+          cp tailscale_*/tailscale staging/bin/
+          cp tailscale_*/tailscaled staging/bin/
 
-          mv tailscale_*/tailscale staging/bin/
-          mv tailscale_*/tailscaled staging/bin/
-
-      - name: Create CGI API
+      - name: Copy RunFilesBuilder files
         run: |
-          cat << 'EOF' > staging/www/cgi-bin/tailscale_api
-          #!/bin/sh
-          echo "Content-type: application/json"
-          echo ""
+          mkdir -p staging/usr
+          mkdir -p staging/www
 
-          TS=/bin/tailscale
+          # 直接整体拷贝 files 里的内容，对应路由器根目录 /
+          cp -r RunFilesBuilder/x86_64/files/* staging/
 
-          case "$QUERY_STRING" in
-            *action=status*)
-              ST=$($TS status --json 2>/dev/null)
-              if [ -z "$ST" ]; then
-                echo '{"active":"未运行","ip":"-"}'
-              else
-                IP=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0] // "-"')
-                echo "{\"active\":\"运行中\",\"ip\":\"$IP\"}"
-              fi
-              ;;
-            *action=login*)
-              $TS up --accept-dns=false >/dev/null 2>&1 &
-              echo '{"result":"ok"}'
-              ;;
-            *action=logout*)
-              $TS logout >/dev/null 2>&1
-              echo '{"result":"ok"}'
-              ;;
-          esac
-          EOF
-          chmod +x staging/www/cgi-bin/tailscale_api
-
-      - name: Create LuCI Controller
+      - name: Build .run package
         run: |
-          cat << 'EOF' > staging/usr/lib/lua/luci/controller/tailscale_web.lua
-          module("luci.controller.tailscale_web", package.seeall)
-
-          function index()
-            entry({"admin","services","tailscale_web"},
-                  template("tailscale_web/index"),
-                  _("Tailscale"), 99)
-          end
-          EOF
-
-      - name: Create LuCI Page (CLICKABLE BUTTONS)
-        run: |
-          cat << 'EOF' > staging/usr/lib/lua/luci/view/tailscale_web/index.htm
-          <%+header%>
-
-          <h2 style="margin-bottom:15px;">Tailscale 控制面板</h2>
-
-          <div style="background:#fff;padding:15px;border:1px solid #ddd;border-radius:4px;max-width:480px;">
-            <p><strong>状态：</strong>
-              <span id="st" style="color:#888;">检测中…</span>
-            </p>
-            <p><strong>IP：</strong>
-              <span id="ip">-</span>
-            </p>
-
-            <div style="margin-top:15px;">
-              <button type="button"
-                      style="padding:6px 14px;margin-right:10px;cursor:pointer;"
-                      onclick="doAct('login')">
-                登录 Tailscale
-              </button>
-
-              <button type="button"
-                      style="padding:6px 14px;cursor:pointer;"
-                      onclick="doAct('logout')">
-                注销
-              </button>
-            </div>
-          </div>
-
-          <script>
-          function refresh() {
-            fetch('/cgi-bin/tailscale_api?action=status')
-              .then(r => r.json())
-              .then(d => {
-                document.getElementById('st').innerText = d.active || '-';
-                document.getElementById('st').style.color =
-                  (d.active === '运行中') ? 'green' : 'red';
-                document.getElementById('ip').innerText = d.ip || '-';
-              });
-          }
-
-          function doAct(a) {
-            fetch('/cgi-bin/tailscale_api?action=' + a)
-              .then(() => setTimeout(refresh, 2000));
-          }
-
-          refresh();
-          setInterval(refresh, 5000);
-          </script>
-
-          <%+footer%>
-          EOF
-
-      - name: Build RUN Package
-        run: |
-          cp shell/install-tailscale.sh staging/install.sh
+          cp install-tailscale.sh staging/install.sh
           chmod +x staging/install.sh
-          makeself staging tailscale.run "Tailscale" ./install.sh
+          makeself staging tailscale.run "Tailscale Installer" ./install.sh
 
-      - name: Create Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ github.run_number }}
