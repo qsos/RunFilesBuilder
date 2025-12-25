@@ -1,7 +1,10 @@
-name: Build Tailscale
+name: Build Tailscale Advanced Console
 
 on:
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -10,10 +13,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare
+      - name: Prepare Tools
         run: sudo apt-get update && sudo apt-get install -y makeself jq curl
 
-      - name: Get Files
+      - name: Download Binary
+        id: v
         run: |
           VERSION=$(curl -sL https://api.github.com/repos/tailscale/tailscale/releases/latest | jq -r ".tag_name" | sed 's/v//')
           curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${VERSION}_amd64.tgz" -o ts.tgz
@@ -21,9 +25,9 @@ jobs:
           mkdir -p staging/bin staging/usr/lib/lua/luci/controller/ staging/usr/lib/lua/luci/view/tailscale_web/ staging/www/cgi-bin/
           mv tailscale_*/tailscale staging/bin/
           mv tailscale_*/tailscaled staging/bin/
-          echo "$VERSION" > version.txt
+          echo "tag=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Create API
+      - name: Create Backend API
         run: |
           cat << 'EOF' > staging/www/cgi-bin/tailscale_api
           #!/bin/sh
@@ -31,16 +35,19 @@ jobs:
           echo ""
           TS="/bin/tailscale"
           case "$QUERY_STRING" in
-            *action=status*)
-              ST=$(timeout 2 $TS status --json 2>/dev/null)
-              if [ -z "$ST" ]; then
-                URL=$(timeout 2 $TS up --accept-dns=false --reset 2>&1 | grep -o 'https://login.tailscale.com/a/[^ ]*' | head -n 1)
-                echo "{\"active\": \"未登录\", \"url\": \"$URL\"}"
-              else
-                IP=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0] // "-"')
-                echo "{\"active\": \"运行中\", \"ip\": \"$IP\"}"
-              fi ;;
-            *action=logout*) $TS logout >/dev/null 2>&1; echo "{\"result\": \"ok\"}" ;;
+              *action=status*)
+                  ST=$(timeout 2 $TS status --json 2>/dev/null)
+                  STATE=$(echo "$ST" | jq -r '.BackendState // ""')
+                  if [ "$STATE" != "Running" ]; then
+                      # 抓取设备专属授权链接
+                      URL=$(timeout 5 $TS up --accept-dns=false --reset 2>&1 | grep -o 'https://login.tailscale.com/a/[^ ]*' | head -n 1)
+                      echo "{\"active\": \"未登录\", \"url\": \"$URL\"}"
+                  else
+                      IP=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0] // "-"')
+                      DEVICES=$(echo "$ST" | jq -c '.Peer | to_entries | map({hostname: .value.HostName, ip: (.value.TailscaleIPs[0] // "-"), online: .value.Online})')
+                      echo "{\"active\": \"运行中\", \"ip\": \"$IP\", \"devices\": $DEVICES}"
+                  fi ;;
+              *action=logout*) $TS logout >/dev/null 2>&1; echo "{\"result\": \"ok\"}" ;;
           esac
           EOF
           chmod 755 staging/www/cgi-bin/tailscale_api
@@ -50,33 +57,43 @@ jobs:
           cat << 'EOF' > staging/usr/lib/lua/luci/view/tailscale_web/index.htm
           <%+header%>
           <div class="cbi-map">
-            <h2>Tailscale 控制面板</h2>
-            <div id="auth-box" style="display:none; background:#fffbe6; padding:20px; border:1px solid #ffe58f; margin-bottom:20px; text-align:center;">
-              <p id="msg">正在准备授权链接...</p>
-              <a id="btn" href="#" target="_blank" style="display:none; padding:10px 20px; background:#1890ff; color:#fff; text-decoration:none; font-weight:bold; border-radius:4px;">👉 点击前往官网登录 👈</a>
-            </div>
-            <div style="background:#fff; padding:15px; border:1px solid #ddd; display:flex; justify-content:space-between; align-items:center;">
-              <div>状态: <span id="st">初始化...</span><br>IP: <span id="ip">-</span></div>
-              <button class="cbi-button cbi-button-reset" onclick="fetch('/cgi-bin/tailscale_api?action=logout').then(()=>location.reload())">退出登录</button>
-            </div>
+              <h2 style="margin-bottom:20px">Tailscale 控制面板</h2>
+              <div id="auth-box" style="display:none; background:#fffbe6; padding:20px; border:1px solid #ffe58f; border-radius:4px; margin-bottom:20px; text-align:center;">
+                  <strong style="color:#856404;">⚠️ 需要授权登录</strong>
+                  <p id="msg" style="margin:10px 0;">正在准备您的专属授权链接，请稍候...</p>
+                  <a id="btn" href="#" target="_blank" style="display:none; padding:12px 24px; background:#1890ff; color:#fff; text-decoration:none; font-weight:bold; border-radius:4px;">👉 点击前往官网授权 👈</a>
+              </div>
+              <div style="background:#fff; padding:15px; border:1px solid #ddd; border-radius:4px; display:flex; justify-content:space-between; align-items:center;">
+                  <div><strong>状态:</strong> <span id="st">检测中...</span><br><small id="ip">地址: -</small></div>
+                  <button class="cbi-button cbi-button-reset" onclick="fetch('/cgi-bin/tailscale_api?action=logout').then(()=>location.reload())">退出并重置</button>
+              </div>
+              <table class="cbi-section-table" style="width:100%; margin-top:20px; border:1px solid #eee;">
+                  <thead><tr class="cbi-section-table-titles"><th class="cbi-section-table-cell" style="padding:10px;">在线节点</th><th class="cbi-section-table-cell" style="padding:10px;">IP / 状态</th></tr></thead>
+                  <tbody id="list"></tbody>
+              </table>
           </div>
           <script>
-            function refresh() {
-              fetch('/cgi-bin/tailscale_api?action=status').then(r => r.json()).then(d => {
-                document.getElementById('st').innerText = d.active;
-                document.getElementById('st').style.color = (d.active === "运行中") ? "green" : "red";
-                document.getElementById('ip').innerText = d.ip || "-";
-                if (d.active === "未登录") {
-                  document.getElementById('auth-box').style.display = 'block';
-                  if(d.url){ 
-                    document.getElementById('btn').style.display='inline-block'; 
-                    document.getElementById('btn').href=d.url;
-                    document.getElementById('msg').innerText="请点击下方按钮登录：";
-                  }
-                } else { document.getElementById('auth-box').style.display = 'none'; }
-              });
-            }
-            setInterval(refresh, 5000); refresh();
+              function refresh() {
+                  fetch('/cgi-bin/tailscale_api?action=status').then(r => r.json()).then(d => {
+                      document.getElementById('st').innerText = d.active;
+                      document.getElementById('st').style.color = (d.active === "运行中") ? "#28a745" : "#ff4d4f";
+                      document.getElementById('ip').innerText = "地址: " + (d.ip || "-");
+                      if (d.active === "未登录") {
+                          document.getElementById('auth-box').style.display = 'block';
+                          if(d.url) {
+                              document.getElementById('btn').style.display = 'inline-block';
+                              document.getElementById('btn').href = d.url;
+                              document.getElementById('msg').innerText = "授权链接已就绪，请点击下方按钮完成登录：";
+                          }
+                      } else { document.getElementById('auth-box').style.display = 'none'; }
+                      let h = '';
+                      if(d.devices) d.devices.forEach(v => {
+                          h += '<tr><td style="padding:10px;">'+v.hostname+'</td><td style="padding:10px;">'+v.ip+' '+(v.online?'●':'○')+'</td></tr>';
+                      });
+                      document.getElementById('list').innerHTML = h || '<tr><td colspan="2" style="text-align:center;padding:20px;color:#999;">等待登录完成...</td></tr>';
+                  });
+              }
+              refresh(); setInterval(refresh, 5000);
           </script>
           <%+footer%>
           EOF
@@ -86,18 +103,17 @@ jobs:
           cat << 'EOF' > staging/usr/lib/lua/luci/controller/tailscale_web.lua
           module("luci.controller.tailscale_web", package.seeall)
           function index()
-            entry({"admin", "services", "tailscale_web"}, template("tailscale_web/index"), _("Tailscale"), 99)
+              entry({"admin", "services", "tailscale_web"}, template("tailscale_web/index"), _("Tailscale"), 99)
           end
           EOF
 
-      - name: Build
+      - name: Build Package
         run: |
-          VER=$(cat version.txt)
           cp shell/install-tailscale.sh staging/install.sh
           chmod +x staging/install.sh
-          makeself staging "tailscale-${VER}.run" "Tailscale" ./install.sh
+          makeself staging "tailscale-setup.run" "Tailscale" ./install.sh
 
-      - name: Release
+      - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "v${{ github.run_number }}"
