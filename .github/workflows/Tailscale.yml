@@ -48,7 +48,7 @@ jobs:
           echo "Content-type: application/json"
           echo ""
           
-          # 1. 处理控制指令
+          # 仅处理控制指令
           case "$QUERY_STRING" in
               *action=login*)
                   /usr/sbin/tailscale up --accept-dns=false --reset >/dev/null 2>&1 &
@@ -58,18 +58,16 @@ jobs:
                   echo "{\"result\": \"ok\"}" ; exit 0 ;;
           esac
 
-          # 2. 获取并解析状态
+          # 获取解析状态，防止显示为 null
           ST=$(/usr/sbin/tailscale status --json 2>/dev/null)
-          if [ $? -ne 0 ] || [ -z "$ST" ]; then
+          if [ $? -ne 0 ]; then
               echo "{\"active\": \"未运行\", \"ip\": \"-\", \"devices\": []}"
           else
-              # 提取本地 IP
               SELF_IP=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0] // "-"')
-              # 提取远程节点列表
               PEERS=$(echo "$ST" | jq -c '.Peer | to_entries | map({
                   name: .value.HostName,
                   ip: (.value.TailscaleIPs[0] // "-"),
-                  os: (.value.OS // "unknown"),
+                  os: (.value.OS // "Linux"),
                   ver: (.value.Version // "-"),
                   online: .value.Online
               })')
@@ -78,7 +76,7 @@ jobs:
           EOF
           chmod 755 staging/www/cgi-bin/tailscale_api
 
-      - name: Create UI (iStoreOS 简约风格)
+      - name: Create UI (修正 API 绑定与重叠)
         run: |
           cat << 'EOF' > staging/usr/lib/lua/luci/view/tailscale_web/index.htm
           <%+header%>
@@ -87,23 +85,23 @@ jobs:
               
               <div style="background:#fff; padding:20px; border:1px solid #d9d9d9; border-radius:4px; margin-bottom:20px; display:flex; justify-content:space-between; align-items:center;">
                   <div>
-                      <div style="font-size:16px; font-weight:bold;">服务状态: <span id="st-txt" style="color:#ff4d4f;">读取中...</span></div>
+                      <div style="font-size:16px; font-weight:bold;">服务状态: <span id="st-txt" style="color:#666">读取中...</span></div>
                       <div style="color:#888; font-size:13px; margin-top:5px;">内网地址: <span id="st-ip">-</span></div>
                   </div>
-                  <div>
+                  <div style="white-space:nowrap;">
                       <button class="cbi-button cbi-button-apply" onclick="doAct('login')">一键上线</button>
                       <button class="cbi-button cbi-button-reset" onclick="doAct('logout')">注销退出</button>
                   </div>
               </div>
 
               <div class="cbi-section">
-                  <table class="cbi-section-table" style="width:100%; background:#fff; border:1px solid #d9d9d9;">
+                  <table class="cbi-section-table" style="width:100%; background:#fff; border:1px solid #d9d9d9; table-layout:fixed;">
                       <thead>
                           <tr class="cbi-section-table-titles">
-                              <th class="cbi-section-table-cell" style="text-align:left; padding:12px;">设备名称</th>
-                              <th class="cbi-section-table-cell" style="text-align:left; padding:12px;">内网 IP</th>
-                              <th class="cbi-section-table-cell" style="text-align:left; padding:12px;">版本 / 系统</th>
-                              <th class="cbi-section-table-cell" style="text-align:left; padding:12px;">状态</th>
+                              <th class="cbi-section-table-cell" style="text-align:left; padding:12px; width:35%;">设备名称</th>
+                              <th class="cbi-section-table-cell" style="text-align:left; padding:12px; width:25%;">内网 IP</th>
+                              <th class="cbi-section-table-cell" style="text-align:left; padding:12px; width:20%;">版本 / 系统</th>
+                              <th class="cbi-section-table-cell" style="text-align:left; padding:12px; width:20%;">状态</th>
                           </tr>
                       </thead>
                       <tbody id="dev-list">
@@ -115,23 +113,22 @@ jobs:
 
           <script>
               function refresh() {
+                  // 使用绝对路径确保 API 能被找到
                   fetch('/cgi-bin/tailscale_api').then(r => r.json()).then(d => {
-                      // 更新顶部状态
                       const txt = document.getElementById('st-txt');
                       txt.innerText = d.active || "未运行";
                       txt.style.color = (d.active === "运行中") ? "#52c41a" : "#ff4d4f";
                       document.getElementById('st-ip').innerText = d.ip || "-";
 
-                      // 更新表格列表
                       const tbody = document.getElementById('dev-list');
                       tbody.innerHTML = '';
                       if(d.devices && d.devices.length > 0) {
                           d.devices.forEach(dev => {
                               tbody.innerHTML += `
                                   <tr class="cbi-section-table-row">
-                                      <td style="padding:12px;"><strong>${dev.name}</strong></td>
+                                      <td style="padding:12px; overflow:hidden; text-overflow:ellipsis;"><strong>${dev.name}</strong></td>
                                       <td style="padding:12px;"><code>${dev.ip}</code></td>
-                                      <td style="padding:12px; font-size:12px;">${dev.ver}<br><span style="color:#999; text-transform:uppercase;">${dev.os}</span></td>
+                                      <td style="padding:12px; font-size:12px;">${dev.ver}<br><span style="color:#999;">${dev.os}</span></td>
                                       <td style="padding:12px;">
                                           <span style="width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:8px; background:${dev.online?'#52c41a':'#bfbfbf'}"></span>
                                           ${dev.online ? '在线' : '离线'}
@@ -141,22 +138,14 @@ jobs:
                       } else {
                           tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:30px; color:#999;">暂无其他在线设备</td></tr>';
                       }
-                  }).catch(() => {
+                  }).catch(e => {
                       document.getElementById('st-txt').innerText = "API 响应错误";
                   });
               }
 
               function doAct(a) {
-                  const btn = event.target;
-                  const oldText = btn.innerText;
-                  btn.innerText = "处理中...";
-                  btn.disabled = true;
                   fetch('/cgi-bin/tailscale_api?action=' + a).then(() => {
-                      setTimeout(() => {
-                          btn.innerText = oldText;
-                          btn.disabled = false;
-                          refresh();
-                      }, 2000);
+                      setTimeout(refresh, 2000);
                   });
               }
 
@@ -187,9 +176,5 @@ jobs:
           tag_name: "v${{ steps.v.outputs.tag }}"
           name: "Tailscale-Console-v${{ steps.v.outputs.tag }}"
           files: "*.run"
-          body: |
-            ### Tailscale iStoreOS 控制面板
-            - **内核版本**: ${{ steps.v.outputs.tag }}
-            - **优化**: 修复 UI 元素绑定，解决按钮失效问题；修复后端 JSON 解析，解决数据显示空白问题。
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
