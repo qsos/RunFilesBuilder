@@ -10,20 +10,15 @@ on:
   push:
     branches: [ main ]
 
+# 核心修正：在这里强制开启写权限，解决“不报错但没文件”的问题
+permissions:
+  contents: write
+  actions: write
+  releases: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    
-    strategy:
-      matrix:
-        include:
-          - arch: amd64
-            output_name: x86
-          - arch: arm64
-            output_name: arm64
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,7 +39,7 @@ jobs:
       - name: Download and Prepare Staging
         run: |
           VERSION=${{ steps.meta.outputs.version }}
-          curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${VERSION}_${{ matrix.arch }}.tgz" -o tailscale.tgz
+          curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${VERSION}_amd64.tgz" -o tailscale.tgz
           tar xzf tailscale.tgz
           mkdir -p staging/bin staging/usr/lib/lua/luci/controller/ staging/usr/lib/lua/luci/view/tailscale_web/ staging/www/cgi-bin/
           mv tailscale_*/tailscale staging/bin/
@@ -77,32 +72,16 @@ jobs:
                       echo "{\"active\": \"Running\", \"ip\": \"$IP\", \"mail\": \"$MAIL\", \"devices\": $DEVICES}"
                   fi
                   ;;
-              *action=login*)
-                  /usr/sbin/tailscale up --accept-dns=false --reset >/dev/null 2>&1 &
-                  echo "{\"result\": \"success\"}"
-                  ;;
-              *action=logout*)
-                  /usr/sbin/tailscale logout >/dev/null 2>&1
-                  echo "{\"result\": \"success\"}"
-                  ;;
-              *action=subnet_on*)
-                  LAN=$(uci get network.lan.ipaddr | cut -d. -f1-3).0/24
-                  /usr/sbin/tailscale up --advertise-routes=$LAN --reset >/dev/null 2>&1 &
-                  echo "{\"result\": \"success\"}"
-                  ;;
-              *action=subnet_off*)
-                  /usr/sbin/tailscale up --advertise-routes= --reset >/dev/null 2>&1 &
-                  echo "{\"result\": \"success\"}"
-                  ;;
-              *action=expiry_toggle*)
-                  /usr/sbin/tailscale up --reset-node-key >/dev/null 2>&1 &
-                  echo "{\"result\": \"success\"}"
-                  ;;
+              *action=login*) /usr/sbin/tailscale up --accept-dns=false --reset >/dev/null 2>&1 & echo "{\"result\": \"success\"}" ;;
+              *action=logout*) /usr/sbin/tailscale logout >/dev/null 2>&1; echo "{\"result\": \"success\"}" ;;
+              *action=subnet_on*) LAN=$(uci get network.lan.ipaddr | cut -d. -f1-3).0/24; /usr/sbin/tailscale up --advertise-routes=$LAN --reset >/dev/null 2>&1 & echo "{\"result\": \"success\"}" ;;
+              *action=subnet_off*) /usr/sbin/tailscale up --advertise-routes= --reset >/dev/null 2>&1 & echo "{\"result\": \"success\"}" ;;
+              *action=expiry_toggle*) /usr/sbin/tailscale up --reset-node-key >/dev/null 2>&1 & echo "{\"result\": \"success\"}" ;;
           esac
           EOF
           chmod 755 staging/www/cgi-bin/tailscale_api
 
-      - name: Create Console UI (iStoreOS Style)
+      - name: Create Console UI
         run: |
           cat << 'EOF' > staging/usr/lib/lua/luci/view/tailscale_web/index.htm
           <%+header%>
@@ -114,30 +93,20 @@ jobs:
               .tag { background: #eee; padding: 1px 4px; border-radius: 3px; font-size: 11px; color: #666; margin-right: 4px; border: 1px solid #ccc; }
               .tag-blue { background: #e6f7ff; color: #1890ff; border-color: #91d5ff; }
               .drop-btn { cursor: pointer; padding: 2px 8px; border: 1px solid #ccc; background: #fff; border-radius: 4px; }
-              .drop-menu { display: none; position: absolute; background: #fff; min-width: 150px; border: 1px solid #ccc; box-shadow: 0 2px 10px rgba(0,0,0,0.1); z-index: 999; right: 20px; }
+              .drop-menu { display: none; position: absolute; background: #fff; min-width: 150px; border: 1px solid #ccc; box-shadow: 0 2px 10px rgba(0,0,0,0.1); z-index: 999; right: 20px; text-align: left; }
               .drop-menu a { display: block; padding: 8px 12px; text-decoration: none; color: #333; font-size: 13px; border-bottom: 1px solid #eee; }
               .drop-menu a:hover { background: #f0f0f0; }
               .show { display: block; }
           </style>
-
           <div class="cbi-map">
               <h2 name="content">Tailscale 交互控制台</h2>
-              
               <div class="ts-info-bar">
-                  <div>
-                      <strong>当前账号:</strong> <span id="self-mail">加载中...</span>
-                      <span id="self-ip" style="margin-left:15px; color:#666;">IP: -</span>
-                  </div>
+                  <div><strong>当前账号:</strong> <span id="self-mail">加载中...</span> <span id="self-ip" style="margin-left:15px; color:#666;">IP: -</span></div>
                   <div>
                       <button class="cbi-button cbi-button-apply" onclick="doAct('login')">登录</button>
                       <button class="cbi-button cbi-button-reset" onclick="doAct('logout')">注销</button>
                   </div>
               </div>
-
-              <div id="login-link-box" style="display:none; padding:10px; background:#fffbe6; border:1px solid #ffe58f; margin-bottom:15px;">
-                  ⚠️ 需授权: <a id="ts-url" href="#" target="_blank" style="font-weight:bold;">点击登录</a>
-              </div>
-
               <fieldset class="cbi-section">
                   <legend>设备列表</legend>
                   <table class="cbi-section-table" id="dev-table">
@@ -151,9 +120,76 @@ jobs:
                   </table>
               </fieldset>
           </div>
-
           <script>
               function refresh() {
                   fetch('/cgi-bin/tailscale_api?action=status').then(r => r.json()).then(d => {
                       document.getElementById('self-mail').innerText = d.mail || "未登录";
-                      document.getElementById('self-ip').innerText =
+                      document.getElementById('self-ip').innerText = "IP: " + (d.ip || "-");
+                      const table = document.getElementById('dev-table');
+                      while(table.rows.length > 1) table.deleteRow(1);
+                      if(d.devices) {
+                          d.devices.forEach((dev, i) => {
+                              const row = table.insertRow();
+                              row.className = "cbi-section-table-row";
+                              row.innerHTML = `
+                                  <td class="cbi-section-table-cell">
+                                      <strong>${dev.hostname}</strong><span class="m-mail">${d.mail}</span>
+                                      <span class="tag">Expiry ${dev.expiry}</span><span class="tag tag-blue">Subnets</span>
+                                  </td>
+                                  <td class="cbi-section-table-cell">${dev.ip}</td>
+                                  <td class="cbi-section-table-cell">${dev.version}<br/><small style="color:#999">${dev.os}</small></td>
+                                  <td class="cbi-section-table-cell ${dev.online?'status-on':'status-off'}">${dev.online?'● Connected':'○ Offline'}</td>
+                                  <td class="cbi-section-table-cell">
+                                      <div style="position:relative">
+                                          <button class="drop-btn" onclick="document.getElementById('m-'+${i}).classList.toggle('show')">•••</button>
+                                          <div class="drop-menu" id="m-${i}">
+                                              <a href="javascript:void(0)" onclick="doAct('subnet_on')">开启子网路由</a>
+                                              <a href="javascript:void(0)" onclick="doAct('subnet_off')">关闭子网路由</a>
+                                              <a href="javascript:void(0)" onclick="doAct('expiry_toggle')">强制过期重连</a>
+                                              <a href="javascript:void(0)" style="color:red" onclick="doAct('logout')">移除节点</a>
+                                          </div>
+                                      </div>
+                                  </td>`;
+                          });
+                      }
+                  });
+              }
+              function doAct(a) { fetch('/cgi-bin/tailscale_api?action='+a); setTimeout(refresh, 2500); }
+              setInterval(refresh, 10000); refresh();
+              window.onclick = function(e) { if (!e.target.matches('.drop-btn')) { 
+                  var ds = document.getElementsByClassName("drop-menu");
+                  for (var i = 0; i < ds.length; i++) { ds[i].classList.remove('show'); }
+              }};
+          </script>
+          <%+footer%>
+          EOF
+
+      - name: Create LuCI Controller
+        run: |
+          cat << 'EOF' > staging/usr/lib/lua/luci/controller/tailscale_web.lua
+          module("luci.controller.tailscale_web", package.seeall)
+          function index()
+              entry({"admin", "services", "tailscale_web"}, template("tailscale_web/index"), _("Tailscale Console"), 99)
+          end
+          EOF
+
+      - name: Final Build
+        run: |
+          VERSION=${{ steps.meta.outputs.version }}
+          cp shell/install-tailscale.sh staging/install.sh
+          chmod +x staging/install.sh
+          makeself --notemp staging "tailscale-${VERSION}-x86.run" "Tailscale Console" ./install.sh
+
+      - name: Upload Artifact (备份方案)
+        uses: actions/upload-artifact@v4
+        with:
+          name: tailscale-installers
+          path: "*.run"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "v${{ steps.meta.outputs.version }}"
+          name: "Tailscale v${{ steps.meta.outputs.version }} iStoreOS"
+          files: "*.run"
+          token: ${{ secrets.GITHUB_TOKEN }}
