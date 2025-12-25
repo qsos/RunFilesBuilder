@@ -1,40 +1,31 @@
 #!/bin/sh
 
-# 1. 安装 jq 依赖（用于解析 Tailscale 状态）
-opkg update && opkg install jq
+# 1. 停止旧服务
+/etc/init.d/tailscaled stop 2>/dev/null
 
-# 2. 安装文件
+# 2. 强行安装二进制文件到双路径 (解决“找不到执行程序”的问题)
+mkdir -p /bin /usr/sbin
+cp -f bin/tailscale /bin/tailscale
+cp -f bin/tailscaled /bin/tailscaled
 cp -f bin/tailscale /usr/sbin/tailscale
 cp -f bin/tailscaled /usr/sbin/tailscaled
-chmod +x /usr/sbin/tailscale /usr/sbin/tailscaled
+chmod +x /bin/tailscale* /usr/sbin/tailscale*
 
-# 3. 安装 LuCI 界面
-mkdir -p /usr/lib/lua/luci/controller/ /usr/lib/lua/luci/view/tailscale_web/
+# 3. 安装 UI 界面和 API 脚本 (解决红色“Runtime Error”)
+mkdir -p /usr/lib/lua/luci/controller/
+mkdir -p /usr/lib/lua/luci/view/tailscale_web/
+mkdir -p /www/cgi-bin/
+
 cp -f usr/lib/lua/luci/controller/tailscale_web.lua /usr/lib/lua/luci/controller/
-cp -f usr/lib/lua/luci/view/tailscale_web/index.htm /usr/lib/lua/luci/view/tailscale_web/
-
-# 4. 设置后端 API
-mkdir -p /www/cgi-bin
-cp -f www/cgi-bin/tailscale_api /www/cgi-bin/tailscale_api
+cp -rf usr/lib/lua/luci/view/tailscale_web/* /usr/lib/lua/luci/view/tailscale_web/
+cp -f www/cgi-bin/tailscale_api /www/cgi-bin/
 chmod 755 /www/cgi-bin/tailscale_api
 
-# 5. 启动服务逻辑
-/etc/init.d/tailscale stop 2>/dev/null
-cat << 'EOF' > /etc/init.d/tailscale
-#!/bin/sh /etc/rc.common
-START=99
-USE_PROCD=1
-start_service() {
-    mkdir -p /etc/tailscale
-    procd_open_instance
-    procd_set_param command /usr/sbin/tailscaled --state=/etc/tailscale/tailscaled.state
-    procd_set_param respawn
-    procd_close_instance
-}
-EOF
-chmod +x /etc/init.d/tailscale
-/etc/init.d/tailscale enable
-/etc/init.d/tailscale restart
+# 4. 强制刷新 LuCI 缓存 (最关键)
+rm -rf /tmp/luci-indexcache /tmp/luci-modulecache
 
-rm -rf /tmp/luci-indexcache /tmp/luci-modulecache/
-echo "安装完成，iStoreOS 风格面板已就绪。"
+# 5. 重启服务
+/etc/init.d/tailscaled enable
+/etc/init.d/tailscaled start
+
+echo "Tailscale 控制面板安装成功！请刷新网页。"
