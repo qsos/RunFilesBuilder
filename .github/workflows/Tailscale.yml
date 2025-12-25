@@ -9,6 +9,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -16,7 +17,7 @@ jobs:
       - name: Prepare Tools
         run: sudo apt-get update && sudo apt-get install -y makeself jq curl
 
-      - name: Download Binary
+      - name: Download Tailscale
         run: |
           VERSION=$(curl -sL https://api.github.com/repos/tailscale/tailscale/releases/latest | jq -r ".tag_name" | sed 's/v//')
           curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${VERSION}_amd64.tgz" -o ts.tgz
@@ -40,7 +41,7 @@ jobs:
           TS=/bin/tailscale
 
           case "$QUERY_STRING" in
-            *status*)
+            *action=status*)
               ST=$($TS status --json 2>/dev/null)
               if [ -z "$ST" ]; then
                 echo '{"active":"未运行","ip":"-"}'
@@ -49,11 +50,11 @@ jobs:
                 echo "{\"active\":\"运行中\",\"ip\":\"$IP\"}"
               fi
               ;;
-            *login*)
+            *action=login*)
               $TS up --accept-dns=false >/dev/null 2>&1 &
               echo '{"result":"ok"}'
               ;;
-            *logout*)
+            *action=logout*)
               $TS logout >/dev/null 2>&1
               echo '{"result":"ok"}'
               ;;
@@ -73,43 +74,67 @@ jobs:
           end
           EOF
 
-      - name: Create LuCI Page
+      - name: Create LuCI Page (CLICKABLE BUTTONS)
         run: |
           cat << 'EOF' > staging/usr/lib/lua/luci/view/tailscale_web/index.htm
           <%+header%>
-          <h2>Tailscale</h2>
-          <div>
-            <p>状态：<span id="st">检测中</span></p>
-            <p>IP：<span id="ip">-</span></p>
-            <button onclick="act('login')">登录</button>
-            <button onclick="act('logout')">注销</button>
+
+          <h2 style="margin-bottom:15px;">Tailscale 控制面板</h2>
+
+          <div style="background:#fff;padding:15px;border:1px solid #ddd;border-radius:4px;max-width:480px;">
+            <p><strong>状态：</strong>
+              <span id="st" style="color:#888;">检测中…</span>
+            </p>
+            <p><strong>IP：</strong>
+              <span id="ip">-</span>
+            </p>
+
+            <div style="margin-top:15px;">
+              <button type="button"
+                      style="padding:6px 14px;margin-right:10px;cursor:pointer;"
+                      onclick="doAct('login')">
+                登录 Tailscale
+              </button>
+
+              <button type="button"
+                      style="padding:6px 14px;cursor:pointer;"
+                      onclick="doAct('logout')">
+                注销
+              </button>
+            </div>
           </div>
 
           <script>
-          function refresh(){
-            fetch('/cgi-bin/tailscale_api?status=1')
-              .then(r=>r.json())
-              .then(d=>{
-                document.getElementById('st').innerText=d.active;
-                document.getElementById('ip').innerText=d.ip;
+          function refresh() {
+            fetch('/cgi-bin/tailscale_api?action=status')
+              .then(r => r.json())
+              .then(d => {
+                document.getElementById('st').innerText = d.active || '-';
+                document.getElementById('st').style.color =
+                  (d.active === '运行中') ? 'green' : 'red';
+                document.getElementById('ip').innerText = d.ip || '-';
               });
           }
-          function act(a){
-            fetch('/cgi-bin/tailscale_api?'+a+'=1');
-            setTimeout(refresh,2000);
+
+          function doAct(a) {
+            fetch('/cgi-bin/tailscale_api?action=' + a)
+              .then(() => setTimeout(refresh, 2000));
           }
+
           refresh();
+          setInterval(refresh, 5000);
           </script>
+
           <%+footer%>
           EOF
 
-      - name: Build RUN
+      - name: Build RUN Package
         run: |
           cp shell/install-tailscale.sh staging/install.sh
           chmod +x staging/install.sh
           makeself staging tailscale.run "Tailscale" ./install.sh
 
-      - name: Release
+      - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ github.run_number }}
