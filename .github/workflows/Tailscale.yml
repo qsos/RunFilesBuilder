@@ -36,6 +36,7 @@ jobs:
           mkdir -p staging/bin staging/usr/lib/lua/luci/controller/ staging/usr/lib/lua/luci/view/tailscale_web/ staging/www/cgi-bin/
           mv tailscale_*/tailscale staging/bin/
           mv tailscale_*/tailscaled staging/bin/
+          rm -rf tailscale.tgz tailscale_*
 
       - name: Create Backend API
         run: |
@@ -47,7 +48,7 @@ jobs:
               *action=status*)
                   ST=$(/usr/sbin/tailscale status --json 2>/dev/null)
                   if [ $? -ne 0 ]; then
-                      echo "{\"active\": \"未启动\", \"ip\": \"-\"}"
+                      echo "{\"active\": \"Stopped\", \"ip\": \"-\"}"
                   else
                       BACKEND=$(echo "$ST" | jq -r '.BackendState')
                       IP=$(echo "$ST" | jq -r '.TailscaleIPs[0] // "-"')
@@ -65,7 +66,7 @@ jobs:
                   ;;
           esac
           EOF
-          chmod +x staging/www/cgi-bin/tailscale_api
+          chmod 755 staging/www/cgi-bin/tailscale_api
 
       - name: Create Console UI
         run: |
@@ -77,11 +78,65 @@ jobs:
                   <div style="padding:20px; background:#f9f9f9; border-radius:8px; border:1px solid #ddd;">
                       <p>节点状态: <b id="ts-status" style="color:orange;">获取中...</b></p>
                       <p>内网地址: <b id="ts-ip">-</b></p>
-                      <hr/>
+                      <hr style="margin:15px 0; border:0; border-top:1px solid #eee;"/>
                       <div style="margin-top:15px;">
-                          <button class="cbi-button cbi-button-apply important" onclick="doAct('login')">一键上线</button>
-                          <button class="cbi-button cbi-button-reset" onclick="doAct('logout')">注销退出</button>
+                          <button class="cbi-button cbi-button-apply important" style="font-size:1.1em; padding:8px 20px;" onclick="doAct('login')">一键上线</button>
+                          <button class="cbi-button cbi-button-reset" style="font-size:1.1em; padding:8px 20px; margin-left:10px;" onclick="doAct('logout')">注销退出</button>
                       </div>
-                      <div id="login-box" style="display:none; margin-top:15px; background:#fffbe6; padding:10px; border:1px solid #ffe58f;">
-                          <p>需要授权，请点击链接登录：</p>
-                          <a id="ts-url" href="#" target="_blank" style="color:#
+                      <div id="login-box" style="display:none; margin-top:20px; background:#fffbe6; padding:15px; border:1px solid #ffe58f; border-radius:4px;">
+                          <p style="color:#856404;">⚠️ 需要授权，请点击下方链接登录：</p>
+                          <a id="ts-url" href="#" target="_blank" style="color:#1890ff; font-weight:bold; text-decoration:underline; word-break:break-all;">[ 点击此处跳转官方授权页 ]</a>
+                      </div>
+                  </div>
+              </fieldset>
+          </div>
+          <script>
+              function refresh() {
+                  fetch('/cgi-bin/tailscale_api?action=status')
+                  .then(r => r.json())
+                  .then(d => {
+                      document.getElementById('ts-status').innerText = d.active;
+                      document.getElementById('ts-status').style.color = d.active === "Running" ? "green" : "red";
+                      document.getElementById('ts-ip').innerText = d.ip;
+                      if(d.url && d.url !== "") {
+                          document.getElementById('login-box').style.display = 'block';
+                          document.getElementById('ts-url').href = d.url;
+                      } else {
+                          document.getElementById('login-box').style.display = 'none';
+                      }
+                  })
+                  .catch(() => { document.getElementById('ts-status').innerText = "后端未响应"; });
+              }
+              function doAct(a) {
+                  document.getElementById('ts-status').innerText = "正在发送指令...";
+                  fetch('/cgi-bin/tailscale_api?action=' + a);
+                  setTimeout(refresh, 3000);
+              }
+              setInterval(refresh, 5000); refresh();
+          </script>
+          <%+footer%>
+          EOF
+
+      - name: Create LuCI Controller
+        run: |
+          cat << 'EOF' > staging/usr/lib/lua/luci/controller/tailscale_web.lua
+          module("luci.controller.tailscale_web", package.seeall)
+          function index()
+              entry({"admin", "services", "tailscale_web"}, template("tailscale_web/index"), _("Tailscale Console"), 99)
+          end
+          EOF
+
+      - name: Final Build
+        run: |
+          cp shell/install-tailscale.sh staging/install.sh
+          chmod +x staging/install.sh
+          makeself --notemp staging tailscale-${{ matrix.output_name }}.run "Tailscale Console" ./install.sh
+
+      - name: Upload Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.meta.outputs.version }}
+          name: "Tailscale v${{ steps.meta.outputs.version }} Console"
+          files: "*.run"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
