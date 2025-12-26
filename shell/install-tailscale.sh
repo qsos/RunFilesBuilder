@@ -25,9 +25,12 @@ start_service() {
     procd_close_instance
 }
 EOF
-
 chmod +x /etc/init.d/tailscaled
 /etc/init.d/tailscaled enable
 /etc/init.d/tailscaled start
 
-rm -rf /tmp/luci-*
+# 【精准修复 404】重启 Web 服务并强刷 LuCI 索引缓存
+/etc/init.d/uhttpd restart
+rm -rf /tmp/luci-indexcache /tmp/luci-modulecache/*
+
+echo "Success! Please refresh your browser."
