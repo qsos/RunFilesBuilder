@@ -92,31 +92,43 @@ jobs:
                   $TS down >/dev/null 2>&1
                   sleep 1
                   
-                  # 关键修复：使用 --login-server 参数，避免默认的重定向到 localhost
-                  # 这会生成一个登录URL，用户点击后跳转到Tailscale官方登录页面
-                  echo "执行: $TS up --accept-dns=false --reset --login-server=https://login.tailscale.com 2>&1" >> $DEBUG_LOG
-                  LOGIN_OUTPUT=$($TS up --accept-dns=false --reset --login-server=https://login.tailscale.com 2>&1)
+                  # 关键修复：使用 tailscale up 命令，它会输出登录链接
+                  echo "执行: tailscale up --accept-dns=false --reset 2>&1" >> $DEBUG_LOG
+                  LOGIN_OUTPUT=$($TS up --accept-dns=false --reset 2>&1)
                   LOGIN_CODE=$?
                   echo "返回码: $LOGIN_CODE" >> $DEBUG_LOG
                   echo "输出: $LOGIN_OUTPUT" >> $DEBUG_LOG
                   
-                  # 从输出中提取URL
+                  # 从输出中提取完整的登录URL
                   AUTH_URL=""
-                  # 尝试多种方式提取URL
+                  
+                  # 尝试从输出中提取 https://login.tailscale.com/a/ 开头的完整链接
                   if echo "$LOGIN_OUTPUT" | grep -q "https://login.tailscale.com/a/"; then
+                      # 提取完整的URL
                       AUTH_URL=$(echo "$LOGIN_OUTPUT" | grep -o "https://login.tailscale.com/a/[^ ]*" | head -1)
-                  elif echo "$LOGIN_OUTPUT" | grep -q "https://"; then
-                      AUTH_URL=$(echo "$LOGIN_OUTPUT" | grep -o "https://[^ ]*" | head -1)
+                      # 清理URL，移除可能的引号或标点
+                      AUTH_URL=$(echo "$AUTH_URL" | sed 's/[",]*$//' | sed "s/'*$//")
+                      echo "找到登录链接: $AUTH_URL" >> $DEBUG_LOG
+                  fi
+                  
+                  # 如果找不到URL，尝试使用 --qr 参数
+                  if [ -z "$AUTH_URL" ]; then
+                      echo "尝试使用 --qr 参数..." >> $DEBUG_LOG
+                      QR_OUTPUT=$($TS up --accept-dns=false --reset --qr 2>&1)
+                      echo "QR输出: $QR_OUTPUT" >> $DEBUG_LOG
+                      
+                      if echo "$QR_OUTPUT" | grep -q "https://login.tailscale.com/a/"; then
+                          AUTH_URL=$(echo "$QR_OUTPUT" | grep -o "https://login.tailscale.com/a/[^ ]*" | head -1)
+                          AUTH_URL=$(echo "$AUTH_URL" | sed 's/[",]*$//' | sed "s/'*$//")
+                          echo "找到登录链接(QR): $AUTH_URL" >> $DEBUG_LOG
+                      fi
                   fi
                   
                   if [ -n "$AUTH_URL" ]; then
-                      echo "找到登录链接: $AUTH_URL" >> $DEBUG_LOG
                       echo "{\"result\": \"ok\", \"auth_url\": \"$AUTH_URL\"}"
                   else
-                      # 如果找不到URL，直接提供默认的登录页面
-                      AUTH_URL="https://login.tailscale.com/a/console"
-                      echo "使用默认登录链接: $AUTH_URL" >> $DEBUG_LOG
-                      echo "{\"result\": \"ok\", \"auth_url\": \"$AUTH_URL\"}"
+                      # 如果还是找不到，返回错误信息
+                      echo "{\"result\": \"error\", \"message\": \"无法获取登录链接，请在终端执行: tailscale up\"}"
                   fi ;;
                   
               *action=auth_check*)
@@ -193,6 +205,17 @@ jobs:
           .status-running { background: #d4edda; color: #155724; }
           .status-stopped { background: #f8d7da; color: #721c24; }
           .status-starting { background: #fff3cd; color: #856404; }
+          .login-btn {
+              display: inline-block;
+              padding: 12px 24px;
+              background: #0066cc;
+              color: white;
+              text-decoration: none;
+              border-radius: 6px;
+              font-weight: bold;
+              text-align: center;
+              margin: 10px 0;
+          }
           </style>
           
           <div class="cbi-map">
@@ -220,7 +243,7 @@ jobs:
                   <div class="login-box">
                       <h3 style="margin-top:0; border-bottom:1px solid #eee; padding-bottom:10px;">Tailscale 登录</h3>
                       <div style="margin:20px 0;">
-                          <div id="login-message" style="padding:15px; background:#f8f9fa; border-radius:5px; margin-bottom:20px;">
+                          <div id="loading-section" style="padding:15px; background:#f8f9fa; border-radius:5px; margin-bottom:20px;">
                               <span class="spinner"></span>
                               <span>正在生成登录链接，请稍候...</span>
                           </div>
@@ -232,8 +255,7 @@ jobs:
                               </div>
                               
                               <div style="text-align:center; margin:20px 0;">
-                                  <a id="auth-link" href="#" target="_blank" 
-                                     style="display:inline-block; padding:12px 24px; background:#0066cc; color:white; text-decoration:none; border-radius:6px; font-weight:bold;">
+                                  <a id="auth-link" href="#" target="_blank" class="login-btn">
                                       🔗 点击打开 Tailscale 登录页面
                                   </a>
                               </div>
@@ -318,11 +340,11 @@ jobs:
           
           async function generateLoginLink() {
               // 重置UI
-              document.getElementById('login-message').innerHTML = '<span class="spinner"></span><span>正在生成登录链接，请稍候...</span>';
+              document.getElementById('loading-section').style.display = 'block';
               document.getElementById('success-section').style.display = 'none';
+              document.getElementById('status-check').style.display = 'none';
               document.getElementById('error-section').style.display = 'none';
               document.getElementById('retry-btn').style.display = 'none';
-              document.getElementById('status-check').style.display = 'none';
               
               try {
                   const response = await fetch('/cgi-bin/tailscale_api?action=login&t=' + Date.now());
@@ -330,28 +352,26 @@ jobs:
                   
                   if (data.result === 'ok' && data.auth_url) {
                       // 显示成功消息
-                      document.getElementById('login-message').style.display = 'none';
+                      document.getElementById('loading-section').style.display = 'none';
                       document.getElementById('success-section').style.display = 'block';
+                      document.getElementById('status-check').style.display = 'block';
                       
                       // 设置链接
                       const authLink = document.getElementById('auth-link');
                       authLink.href = data.auth_url;
                       
-                      // 显示状态检查
-                      document.getElementById('status-check').style.display = 'block';
-                      
                       // 开始检查登录状态
                       startAuthCheck();
                   } else {
                       // 显示错误
-                      document.getElementById('login-message').style.display = 'none';
+                      document.getElementById('loading-section').style.display = 'none';
                       document.getElementById('error-section').style.display = 'block';
                       document.getElementById('error-message').textContent = data.message || '登录链接生成失败';
                       document.getElementById('retry-btn').style.display = 'inline-block';
                   }
               } catch (error) {
                   console.error('请求失败:', error);
-                  document.getElementById('login-message').style.display = 'none';
+                  document.getElementById('loading-section').style.display = 'none';
                   document.getElementById('error-section').style.display = 'block';
                   document.getElementById('error-message').textContent = '请求失败: ' + error.message;
                   document.getElementById('retry-btn').style.display = 'inline-block';
