@@ -58,7 +58,28 @@ jobs:
                       DEVICES=$(echo "$ST" | jq -c '.Peer | to_entries | map({hostname: .value.HostName, ip: (.value.TailscaleIPs[0] // "-"), os: (.value.OS // "-"), version: (.value.Version // "-"), online: .value.Online})')
                       echo "{\"active\": \"运行中\", \"ip\": \"$IP\", \"devices\": $DEVICES}"
                   fi ;;
-              *action=login*) $TS up --accept-dns=false --reset >/dev/null 2>&1 & echo "{\"result\": \"ok\"}" ;;
+              *action=login*)
+                  # 生成认证 URL 并返回给前端
+                  AUTH_URL=$($TS up --accept-dns=false --auth-key=$TS_AUTH_KEY 2>/dev/null | grep -o 'https://[^ ]*' || echo "")
+                  if [ -n "$AUTH_URL" ]; then
+                      echo "{\"result\": \"ok\", \"auth_url\": \"$AUTH_URL\"}"
+                  else
+                      # 如果没有指定 auth key，生成交互式登录 URL
+                      LOGIN_URL=$($TS up --accept-dns=false --qr --json 2>/dev/null | jq -r '.url // ""' | head -1)
+                      if [ -n "$LOGIN_URL" ]; then
+                          echo "{\"result\": \"ok\", \"auth_url\": \"$LOGIN_URL\"}"
+                      else
+                          echo "{\"result\": \"error\", \"message\": \"无法生成登录链接\"}"
+                      fi
+                  fi ;;
+              *action=auth_check*)
+                  # 检查认证状态
+                  ST=$($TS status --json 2>/dev/null)
+                  if echo "$ST" | jq -e '.Self.UserID != 0' >/dev/null 2>&1; then
+                      echo "{\"authenticated\": true}"
+                  else
+                      echo "{\"authenticated\": false}"
+                  fi ;;
               *action=logout*) $TS logout >/dev/null 2>&1; echo "{\"result\": \"ok\"}" ;;
           esac
           EOF
@@ -73,10 +94,26 @@ jobs:
               <div style="background:#fff; padding:15px; border:1px solid #ddd; border-radius:4px; margin-bottom:20px; display:flex; justify-content:space-between; align-items:center;">
                   <div><strong>状态:</strong> <span id="st-txt">检测中...</span><br><small id="ip-txt" style="color:#888">地址: -</small></div>
                   <div>
-                      <button class="cbi-button cbi-button-apply" onclick="doAct('login')">一键登录</button>
+                      <button class="cbi-button cbi-button-apply" id="login-btn" onclick="startLogin()">一键登录</button>
                       <button class="cbi-button cbi-button-reset" onclick="doAct('logout')">注销</button>
                   </div>
               </div>
+              
+              <div id="login-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:1000; justify-content:center; align-items:center;">
+                  <div style="background:#fff; padding:20px; border-radius:8px; max-width:500px; width:90%;">
+                      <h3 style="margin-top:0">Tailscale 登录</h3>
+                      <p id="login-message">正在准备登录链接，请稍候...</p>
+                      <div id="qr-container" style="text-align:center; margin:20px 0;"></div>
+                      <div id="auth-link-container" style="margin:20px 0; display:none;">
+                          <p>如果二维码无法识别，请点击下方链接：</p>
+                          <a id="auth-link" href="#" target="_blank" style="word-break:break-all; color:#06c;">点击此处打开登录页面</a>
+                      </div>
+                      <div style="text-align:right; margin-top:20px;">
+                          <button class="cbi-button" onclick="closeLoginModal()">取消</button>
+                      </div>
+                  </div>
+              </div>
+              
               <table class="cbi-section-table" style="width:100%; table-layout:fixed; border:1px solid #eee;">
                   <thead>
                       <tr class="cbi-section-table-titles">
@@ -89,7 +126,10 @@ jobs:
                   <tbody id="dev-list"></tbody>
               </table>
           </div>
+          <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
           <script>
+              let loginCheckInterval;
+              
               function refresh() {
                   fetch('/cgi-bin/tailscale_api?action=status').then(r => r.json()).then(d => {
                       const st = document.getElementById('st-txt');
@@ -110,12 +150,71 @@ jobs:
                       document.getElementById('dev-list').innerHTML = h;
                   });
               }
-              function doAct(a) { 
-                  if(a==='login') { window.open('https://login.tailscale.com/a/console'); }
-                  fetch('/cgi-bin/tailscale_api?action='+a); 
-                  setTimeout(refresh, 2000); 
+              
+              function startLogin() {
+                  document.getElementById('login-modal').style.display = 'flex';
+                  document.getElementById('login-message').innerText = '正在生成登录链接，请稍候...';
+                  
+                  fetch('/cgi-bin/tailscale_api?action=login')
+                      .then(r => r.json())
+                      .then(data => {
+                          if(data.result === 'ok' && data.auth_url) {
+                              document.getElementById('login-message').innerText = '请使用 Tailscale 客户端扫描下方二维码或点击链接完成登录：';
+                              
+                              // 生成二维码
+                              const qrContainer = document.getElementById('qr-container');
+                              qrContainer.innerHTML = '';
+                              QRCode.toCanvas(qrContainer, data.auth_url, { width: 200 }, function (error) {
+                                  if (error) console.error(error);
+                              });
+                              
+                              // 设置链接
+                              const authLink = document.getElementById('auth-link');
+                              authLink.href = data.auth_url;
+                              document.getElementById('auth-link-container').style.display = 'block';
+                              
+                              // 开始检查认证状态
+                              startAuthCheck();
+                          } else {
+                              document.getElementById('login-message').innerText = '登录失败：' + (data.message || '未知错误');
+                          }
+                      })
+                      .catch(error => {
+                          document.getElementById('login-message').innerText = '请求失败，请重试';
+                          console.error(error);
+                      });
               }
-              refresh(); setInterval(refresh, 5000);
+              
+              function startAuthCheck() {
+                  if (loginCheckInterval) clearInterval(loginCheckInterval);
+                  
+                  loginCheckInterval = setInterval(() => {
+                      fetch('/cgi-bin/tailscale_api?action=auth_check')
+                          .then(r => r.json())
+                          .then(data => {
+                              if (data.authenticated) {
+                                  closeLoginModal();
+                                  refresh();
+                                  setTimeout(refresh, 2000); // 再等2秒刷新
+                              }
+                          });
+                  }, 2000); // 每2秒检查一次
+              }
+              
+              function closeLoginModal() {
+                  document.getElementById('login-modal').style.display = 'none';
+                  if (loginCheckInterval) {
+                      clearInterval(loginCheckInterval);
+                      loginCheckInterval = null;
+                  }
+              }
+              
+              function doAct(a) { 
+                  fetch('/cgi-bin/tailscale_api?action='+a).then(() => refresh()); 
+              }
+              
+              refresh(); 
+              setInterval(refresh, 5000);
           </script>
           <%+footer%>
           EOF
