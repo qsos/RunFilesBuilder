@@ -1,148 +1,3 @@
-name: Build Tailscale Advanced Console
-
-on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: '指定版本 (留空则自动获取最新)'
-        required: false
-        default: ''
-
-permissions:
-  contents: write
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Prepare Tools
-        run: sudo apt-get update && sudo apt-get install -y makeself jq curl
-
-      - name: Get Version
-        id: v
-        run: |
-          if [ -z "${{ github.event.inputs.version }}" ]; then
-            VERSION=$(curl -sL https://api.github.com/repos/tailscale/tailscale/releases/latest | jq -r ".tag_name" | sed 's/v//')
-          else
-            VERSION=${{ github.event.inputs.version }}
-          fi
-          echo "tag=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Download Binary
-        run: |
-          VER=${{ steps.v.outputs.tag }}
-          curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${VER}_amd64.tgz" -o ts.tgz
-          tar xzf ts.tgz
-          mkdir -p staging/bin staging/usr/lib/lua/luci/controller/ staging/usr/lib/lua/luci/view/tailscale_web/ staging/www/cgi-bin/
-          mv tailscale_*/tailscale staging/bin/
-          mv tailscale_*/tailscaled staging/bin/
-          rm -rf ts.tgz tailscale_*
-
-      - name: Create Backend API
-        run: |
-          cat << 'EOF' > staging/www/cgi-bin/tailscale_api
-          #!/bin/sh
-          echo "Content-type: application/json"
-          echo ""
-          
-          TS="/bin/tailscale"
-          TS_STATE="/etc/tailscale/tailscaled.state"
-          
-          # 调试信息
-          DEBUG_LOG="/tmp/tailscale_api.log"
-          echo "=== API 请求: $QUERY_STRING ===" >> $DEBUG_LOG
-          echo "时间: $(date)" >> $DEBUG_LOG
-          
-          # 确保 tailscale 命令可用
-          if [ ! -x "$TS" ]; then
-              echo "{\"error\": \"tailscale 命令未找到或不可执行\"}" >> $DEBUG_LOG
-              echo "{\"error\": \"tailscale 命令未找到或不可执行\"}"
-              exit 0
-          fi
-          
-          # 检查服务是否运行
-          if ! pgrep tailscaled > /dev/null 2>&1; then
-              echo "服务未运行，尝试启动..." >> $DEBUG_LOG
-              /etc/init.d/tailscaled start >/dev/null 2>&1
-              sleep 2
-          fi
-          
-          case "$QUERY_STRING" in
-              *action=status*)
-                  echo "执行状态检查" >> $DEBUG_LOG
-                  ST=$($TS status --json 2>/dev/null)
-                  STATUS_CODE=$?
-                  echo "返回码: $STATUS_CODE" >> $DEBUG_LOG
-                  echo "输出长度: ${#ST}" >> $DEBUG_LOG
-                  
-                  if [ $STATUS_CODE -ne 0 ] || [ -z "$ST" ]; then 
-                      echo "{\"active\": \"未运行\", \"ip\": \"-\", \"devices\": [], \"debug\": \"状态码: $STATUS_CODE\"}"
-                  else
-                      IP=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0] // "-"' 2>/dev/null || echo "-")
-                      if [ "$IP" = "null" ] || [ -z "$IP" ]; then
-                          IP="-"
-                      fi
-                      
-                      # 提取设备信息
-                      if echo "$ST" | jq -e '.Peer' >/dev/null 2>&1; then
-                          DEVICES=$(echo "$ST" | jq -c '.Peer | to_entries | map({hostname: .value.HostName, ip: (.value.TailscaleIPs[0] // "-"), os: (.value.OS // "-"), version: (.value.Version // "-"), online: .value.Online})' 2>/dev/null || echo "[]")
-                      else
-                          DEVICES="[]"
-                      fi
-                      
-                      echo "IP: $IP, 设备数: $(echo $DEVICES | jq length 2>/dev/null || echo 0)" >> $DEBUG_LOG
-                      echo "{\"active\": \"运行中\", \"ip\": \"$IP\", \"devices\": $DEVICES}"
-                  fi ;;
-                  
-              *action=login*)
-                  echo "开始登录流程" >> $DEBUG_LOG
-                  
-                  # 生成登录链接（使用 --qr 参数）
-                  echo "执行 tailscale up --qr --json" >> $DEBUG_LOG
-                  LOGIN_OUTPUT=$($TS up --accept-dns=false --reset --qr --json 2>&1)
-                  LOGIN_CODE=$?
-                  echo "登录命令返回码: $LOGIN_CODE" >> $DEBUG_LOG
-                  echo "登录输出: $LOGIN_OUTPUT" >> $DEBUG_LOG
-                  
-                  # 尝试多种方式提取 URL
-                  AUTH_URL=""
-                  if echo "$LOGIN_OUTPUT" | grep -q 'https://'; then
-                      AUTH_URL=$(echo "$LOGIN_OUTPUT" | grep -o 'https://[^ ]*' | head -1)
-                  elif echo "$LOGIN_OUTPUT" | jq -e '.url' >/dev/null 2>&1; then
-                      AUTH_URL=$(echo "$LOGIN_OUTPUT" | jq -r '.url')
-                  fi
-                  
-                  if [ -n "$AUTH_URL" ]; then
-                      echo "获取到登录链接: $AUTH_URL" >> $DEBUG_LOG
-                      echo "{\"result\": \"ok\", \"auth_url\": \"$AUTH_URL\", \"message\": \"请在浏览器中打开此链接完成登录\"}"
-                  else
-                      echo "无法获取登录链接" >> $DEBUG_LOG
-                      echo "{\"result\": \"error\", \"message\": \"无法生成登录链接，请检查服务状态\"}"
-                  fi ;;
-                  
-              *action=auth_check*)
-                  ST=$($TS status --json 2>/dev/null)
-                  if [ $? -eq 0 ] && echo "$ST" | jq -e '.Self.UserID != 0' >/dev/null 2>&1; then
-                      echo "{\"authenticated\": true}"
-                  else
-                      echo "{\"authenticated\": false}"
-                  fi ;;
-                  
-              *action=logout*)
-                  $TS logout >/dev/null 2>&1
-                  echo "{\"result\": \"ok\"}" ;;
-                  
-              *)
-                  echo "{\"error\": \"未知操作: $QUERY_STRING\"}" ;;
-          esac
-          
-          echo "=== 请求结束 ===" >> $DEBUG_LOG
-          EOF
-          chmod 755 staging/www/cgi-bin/tailscale_api
-
       - name: Create UI
         run: |
           cat << 'EOF' > staging/usr/lib/lua/luci/view/tailscale_web/index.htm
@@ -169,49 +24,30 @@ jobs:
               max-height: 80vh;
               overflow-y: auto;
           }
-          .status-badge {
-              display: inline-block;
-              padding: 4px 12px;
-              border-radius: 12px;
-              font-size: 14px;
-              font-weight: bold;
-          }
-          .status-running { background: #d4edda; color: #155724; }
-          .status-stopped { background: #f8d7da; color: #721c24; }
-          .device-table {
-              margin-top: 20px;
-              border: 1px solid #dee2e6;
-              border-radius: 5px;
-              overflow: hidden;
-          }
-          .device-table th {
-              background: #f8f9fa;
-              padding: 12px;
-              text-align: left;
-              font-weight: 600;
-          }
-          .device-table td {
-              padding: 12px;
-              border-top: 1px solid #dee2e6;
-          }
-          .online-dot {
-              display: inline-block;
-              width: 10px;
-              height: 10px;
+          .spinner {
+              width: 24px;
+              height: 24px;
+              border: 3px solid #f3f3f3;
+              border-top: 3px solid #3498db;
               border-radius: 50%;
-              margin-right: 6px;
+              animation: spin 1s linear infinite;
+              display: inline-block;
+              vertical-align: middle;
+              margin-right: 10px;
           }
-          .online { background: #28a745; }
-          .offline { background: #6c757d; }
+          @keyframes spin {
+              0% { transform: rotate(0deg); }
+              100% { transform: rotate(360deg); }
+          }
           </style>
           
           <div class="cbi-map">
               <h2 style="margin-bottom:20px">Tailscale 控制面板</h2>
               
-              <div style="background:#fff; padding:20px; border:1px solid #ddd; border-radius:8px; margin-bottom:25px; display:flex; justify-content:space-between; align-items:center; box-shadow:0 2px 4px rgba(0,0,0,0.05);">
+              <div style="background:#fff; padding:20px; border:1px solid #ddd; border-radius:8px; margin-bottom:25px; display:flex; justify-content:space-between; align-items:center;">
                   <div>
                       <strong style="font-size:16px;">状态:</strong> 
-                      <span id="st-txt" class="status-badge status-stopped">检测中...</span>
+                      <span id="st-txt" style="padding:4px 12px; border-radius:12px; background:#f8f9fa;">检测中...</span>
                       <div style="margin-top:8px; color:#666;">
                           <small>内网地址: <code id="ip-txt">-</code></small>
                       </div>
@@ -223,9 +59,6 @@ jobs:
                       <button class="cbi-button cbi-button-reset" onclick="doAction('logout')" style="padding:10px 20px;">
                           注销
                       </button>
-                      <button class="cbi-button" onclick="refresh(true)" style="padding:10px 15px;" title="刷新状态">
-                          🔄
-                      </button>
                   </div>
               </div>
               
@@ -234,13 +67,11 @@ jobs:
                       <h3 style="margin-top:0; border-bottom:1px solid #eee; padding-bottom:10px;">Tailscale 登录</h3>
                       <div style="margin:20px 0;">
                           <div id="login-message" style="padding:15px; background:#f8f9fa; border-radius:5px; margin-bottom:20px;">
-                              <div style="display:flex; align-items:center; gap:10px;">
-                                  <span class="spinner" style="width:20px; height:20px; border:3px solid #f3f3f3; border-top:3px solid #3498db; border-radius:50%; animation:spin 1s linear infinite;"></span>
-                                  <span>正在生成登录链接，请稍候...</span>
-                              </div>
+                              <span class="spinner"></span>
+                              <span>正在生成登录链接，请稍候...</span>
                           </div>
                           
-                          <div id="qr-section" style="display:none; text-align:center;">
+                          <div id="qr-section" style="display:none; text-align:center; margin:20px 0;">
                               <h4>请扫描二维码登录</h4>
                               <div id="qr-container" style="margin:20px auto; background:#fff; padding:20px; border-radius:8px; display:inline-block; border:1px solid #ddd;"></div>
                               <p style="color:#666; margin-top:10px;">使用 Tailscale 手机客户端扫描二维码</p>
@@ -253,52 +84,33 @@ jobs:
                                       <span id="link-text">加载中...</span>
                                   </a>
                               </div>
-                              <p style="color:#666; font-size:14px;">
-                                  点击上方链接在新窗口中打开登录页面，完成验证后返回此页面。
-                              </p>
                           </div>
                           
-                          <div id="status-section" style="display:none; margin-top:20px; padding:15px; background:#e8f5e8; border-radius:5px;">
-                              <div style="display:flex; align-items:center; gap:10px;">
-                                  <span style="color:#28a745; font-size:20px;">✓</span>
-                                  <span id="status-message">登录状态检查中...</span>
+                          <div id="manual-section" style="display:none; margin-top:20px; padding:15px; background:#fff3cd; border-radius:5px; border:1px solid #ffeaa7;">
+                              <h4 style="color:#856404; margin-top:0;">手动操作指南</h4>
+                              <p id="manual-message" style="margin-bottom:10px;"></p>
+                              <div style="background:#f8f9fa; padding:10px; border-radius:4px; font-family:monospace; font-size:14px;">
+                                  <code id="manual-command"></code>
                               </div>
+                              <p style="color:#666; font-size:14px; margin-top:10px;">
+                                  在SSH终端中执行上述命令获取登录链接
+                              </p>
                           </div>
                       </div>
                       
                       <div style="text-align:right; border-top:1px solid #eee; padding-top:20px;">
-                          <button class="cbi-button" onclick="closeLoginModal()" style="padding:8px 20px;">取消</button>
-                          <button id="retry-btn" class="cbi-button cbi-button-apply" onclick="generateLoginLink()" style="display:none; padding:8px 20px;">重试</button>
+                          <button class="cbi-button" onclick="closeLoginModal()" style="padding:8px 20px;">关闭</button>
+                          <button id="retry-btn" class="cbi-button cbi-button-apply" onclick="generateLoginLink()" style="display:none; padding:8px 20px; margin-left:10px;">重试</button>
                       </div>
                   </div>
               </div>
               
-              <div class="device-table">
-                  <table style="width:100%;">
-                      <thead>
-                          <tr>
-                              <th style="width:35%;">设备名称</th>
-                              <th style="width:25%;">内网 IP</th>
-                              <th style="width:25%;">系统 / 版本</th>
-                              <th style="width:15%;">状态</th>
-                          </tr>
-                      </thead>
-                      <tbody id="dev-list">
-                          <tr>
-                              <td colspan="4" style="text-align:center; padding:40px; color:#999;">
-                                  <div>加载设备列表中...</div>
-                              </td>
-                          </tr>
-                      </tbody>
-                  </table>
-              </div>
-              
-              <div style="margin-top:20px; padding:15px; background:#f8f9fa; border-radius:5px; border-left:4px solid #3498db;">
+              <div style="margin-top:20px; padding:15px; background:#f8f9fa; border-radius:5px;">
                   <h4 style="margin-top:0;">使用说明</h4>
                   <ol style="margin-bottom:0; padding-left:20px;">
                       <li>点击 <strong>一键登录</strong> 按钮开始登录流程</li>
                       <li>使用手机 Tailscale 客户端扫描二维码，或点击链接在浏览器中登录</li>
-                      <li>完成登录验证后，设备列表将自动刷新</li>
+                      <li>完成登录验证后，状态会自动更新</li>
                   </ol>
               </div>
           </div>
@@ -306,97 +118,42 @@ jobs:
           <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
           <script>
           let loginCheckInterval = null;
-          let loginModalOpen = false;
           
-          // 页面加载完成后初始化
-          document.addEventListener('DOMContentLoaded', function() {
-              refresh();
-              // 每10秒自动刷新一次
-              setInterval(() => {
-                  if (!loginModalOpen) {
-                      refresh();
-                  }
-              }, 10000);
-          });
-          
-          async function refresh(manual = false) {
+          async function refresh() {
               try {
                   const response = await fetch('/cgi-bin/tailscale_api?action=status&t=' + Date.now());
-                  if (!response.ok) {
-                      throw new Error(`HTTP ${response.status}`);
-                  }
                   const data = await response.json();
                   
-                  // 更新状态
                   const statusEl = document.getElementById('st-txt');
                   const ipEl = document.getElementById('ip-txt');
                   
-                  if (data.error) {
-                      statusEl.textContent = '错误';
-                      statusEl.className = 'status-badge status-stopped';
-                      ipEl.textContent = data.error;
-                  } else {
-                      const isRunning = data.active === '运行中';
+                  if (data.active === "运行中" || data.active === "已启动") {
                       statusEl.textContent = data.active;
-                      statusEl.className = isRunning ? 'status-badge status-running' : 'status-badge status-stopped';
+                      statusEl.style.backgroundColor = data.active === "运行中" ? '#d4edda' : '#fff3cd';
+                      statusEl.style.color = data.active === "运行中" ? '#155724' : '#856404';
                       ipEl.textContent = data.ip || '-';
-                      
-                      // 更新设备列表
-                      const devList = document.getElementById('dev-list');
-                      if (data.devices && data.devices.length > 0) {
-                          let html = '';
-                          data.devices.forEach(device => {
-                              html += `
-                              <tr>
-                                  <td>
-                                      <strong>${escapeHtml(device.hostname || '未知')}</strong>
-                                  </td>
-                                  <td><code>${escapeHtml(device.ip || '-')}</code></td>
-                                  <td>
-                                      <div style="font-size:12px; color:#666;">${escapeHtml(device.os || '-')}</div>
-                                      <div style="font-size:11px; color:#999;">${escapeHtml(device.version || '-')}</div>
-                                  </td>
-                                  <td>
-                                      <span class="online-dot ${device.online ? 'online' : 'offline'}"></span>
-                                      ${device.online ? '在线' : '离线'}
-                                  </td>
-                              </tr>`;
-                          });
-                          devList.innerHTML = html;
-                      } else {
-                          devList.innerHTML = `
-                          <tr>
-                              <td colspan="4" style="text-align:center; padding:40px; color:#999;">
-                                  <div>暂无设备</div>
-                                  <div style="font-size:12px; margin-top:5px;">请先登录以查看设备列表</div>
-                              </td>
-                          </tr>`;
-                      }
+                  } else {
+                      statusEl.textContent = data.active || "未运行";
+                      statusEl.style.backgroundColor = '#f8d7da';
+                      statusEl.style.color = '#721c24';
+                      ipEl.textContent = '-';
                   }
               } catch (error) {
                   console.error('刷新失败:', error);
-                  document.getElementById('st-txt').textContent = '连接失败';
-                  document.getElementById('st-txt').className = 'status-badge status-stopped';
-                  document.getElementById('ip-txt').textContent = '请检查网络连接';
               }
           }
           
           function startLogin() {
-              loginModalOpen = true;
               document.getElementById('login-modal').style.display = 'flex';
               generateLoginLink();
           }
           
           async function generateLoginLink() {
               // 重置UI
-              document.getElementById('login-message').innerHTML = `
-                  <div style="display:flex; align-items:center; gap:10px;">
-                      <span class="spinner" style="width:20px; height:20px; border:3px solid #f3f3f3; border-top:3px solid #3498db; border-radius:50%; animation:spin 1s linear infinite;"></span>
-                      <span>正在生成登录链接，请稍候...</span>
-                  </div>`;
+              document.getElementById('login-message').innerHTML = '<span class="spinner"></span><span>正在生成登录链接，请稍候...</span>';
               document.getElementById('qr-section').style.display = 'none';
               document.getElementById('link-section').style.display = 'none';
-              document.getElementById('status-section').style.display = 'none';
+              document.getElementById('manual-section').style.display = 'none';
               document.getElementById('retry-btn').style.display = 'none';
               
               try {
@@ -405,48 +162,37 @@ jobs:
                   
                   if (data.result === 'ok' && data.auth_url) {
                       // 显示成功消息
-                      document.getElementById('login-message').innerHTML = `
-                          <div style="color:#155724; background:#d4edda; padding:12px; border-radius:5px;">
-                              <strong>✓ 登录链接已生成</strong>
-                              <div style="font-size:14px; margin-top:5px;">请选择以下任意一种方式完成登录</div>
-                          </div>`;
+                      document.getElementById('login-message').innerHTML = '<span style="color:#155724;">✓ 登录链接已生成！</span>';
                       
                       // 生成二维码
                       const qrContainer = document.getElementById('qr-container');
                       qrContainer.innerHTML = '';
-                      QRCode.toCanvas(qrContainer, data.auth_url, { width: 200, margin: 1 }, function(error) {
+                      QRCode.toCanvas(qrContainer, data.auth_url, { width: 200 }, function(error) {
                           if (error) console.error('二维码生成失败:', error);
                       });
                       document.getElementById('qr-section').style.display = 'block';
                       
                       // 显示链接
-                      const linkText = document.getElementById('link-text');
-                      const authLink = document.getElementById('auth-link');
-                      linkText.textContent = data.auth_url;
-                      authLink.href = data.auth_url;
+                      document.getElementById('link-text').textContent = data.auth_url;
+                      document.getElementById('auth-link').href = data.auth_url;
                       document.getElementById('link-section').style.display = 'block';
-                      
-                      // 显示状态检查
-                      document.getElementById('status-section').style.display = 'block';
                       
                       // 开始检查登录状态
                       startAuthCheck();
+                  } else if (data.result === 'manual') {
+                      // 显示手动操作指南
+                      document.getElementById('login-message').innerHTML = '<span style="color:#856404;">⚠️ 自动生成登录链接失败，请手动操作</span>';
+                      document.getElementById('manual-message').textContent = data.message || '请按照以下步骤操作：';
+                      document.getElementById('manual-command').textContent = data.command || 'tailscale up';
+                      document.getElementById('manual-section').style.display = 'block';
                   } else {
                       // 显示错误
-                      document.getElementById('login-message').innerHTML = `
-                          <div style="color:#721c24; background:#f8d7da; padding:12px; border-radius:5px;">
-                              <strong>✗ 登录链接生成失败</strong>
-                              <div style="font-size:14px; margin-top:5px;">${data.message || '未知错误'}</div>
-                          </div>`;
+                      document.getElementById('login-message').innerHTML = '<span style="color:#721c24;">✗ 登录失败: ' + (data.message || '未知错误') + '</span>';
                       document.getElementById('retry-btn').style.display = 'inline-block';
                   }
               } catch (error) {
                   console.error('请求失败:', error);
-                  document.getElementById('login-message').innerHTML = `
-                      <div style="color:#721c24; background:#f8d7da; padding:12px; border-radius:5px;">
-                          <strong>✗ 请求失败</strong>
-                          <div style="font-size:14px; margin-top:5px;">请检查网络连接后重试</div>
-                      </div>`;
+                  document.getElementById('login-message').innerHTML = '<span style="color:#721c24;">✗ 请求失败: ' + error.message + '</span>';
                   document.getElementById('retry-btn').style.display = 'inline-block';
               }
           }
@@ -455,7 +201,7 @@ jobs:
               if (loginCheckInterval) clearInterval(loginCheckInterval);
               
               let checkCount = 0;
-              const maxChecks = 60; // 最多检查60次（2分钟）
+              const maxChecks = 30; // 最多检查30次（1分钟）
               
               loginCheckInterval = setInterval(async () => {
                   checkCount++;
@@ -465,9 +211,7 @@ jobs:
                       const data = await response.json();
                       
                       if (data.authenticated) {
-                          document.getElementById('status-message').innerHTML = `
-                              <strong style="color:#155724;">✓ 登录成功！</strong>
-                              <div style="font-size:14px; margin-top:5px;">正在刷新设备列表...</div>`;
+                          document.getElementById('login-message').innerHTML = '<span style="color:#155724;">✓ 登录成功！正在刷新状态...</span>';
                           
                           clearInterval(loginCheckInterval);
                           loginCheckInterval = null;
@@ -481,26 +225,11 @@ jobs:
                           return;
                       }
                       
-                      // 更新状态消息
-                      const minutes = Math.floor(checkCount * 2 / 60);
-                      const seconds = (checkCount * 2) % 60;
-                      document.getElementById('status-message').innerHTML = `
-                          <div>
-                              <strong>等待登录验证...</strong>
-                              <div style="font-size:14px; margin-top:5px;">
-                                  已等待 ${minutes}分${seconds}秒，请完成登录验证
-                              </div>
-                          </div>`;
-                      
                       // 超过最大检查次数则停止
                       if (checkCount >= maxChecks) {
                           clearInterval(loginCheckInterval);
                           loginCheckInterval = null;
-                          document.getElementById('status-message').innerHTML = `
-                              <div style="color:#721c24;">
-                                  <strong>✗ 登录超时</strong>
-                                  <div style="font-size:14px; margin-top:5px;">请重新生成登录链接</div>
-                              </div>`;
+                          document.getElementById('login-message').innerHTML = '<span style="color:#721c24;">✗ 登录超时，请重新尝试</span>';
                           document.getElementById('retry-btn').style.display = 'inline-block';
                       }
                   } catch (error) {
@@ -510,7 +239,6 @@ jobs:
           }
           
           function closeLoginModal() {
-              loginModalOpen = false;
               document.getElementById('login-modal').style.display = 'none';
               if (loginCheckInterval) {
                   clearInterval(loginCheckInterval);
@@ -526,57 +254,16 @@ jobs:
               try {
                   await fetch(`/cgi-bin/tailscale_api?action=${action}&t=${Date.now()}`);
                   refresh();
-                  if (action === 'logout') {
-                      alert('注销成功');
-                  }
               } catch (error) {
                   console.error('操作失败:', error);
                   alert('操作失败，请重试');
               }
           }
           
-          function escapeHtml(text) {
-              const div = document.createElement('div');
-              div.textContent = text;
-              return div.innerHTML;
-          }
-          
-          // 添加CSS动画
-          const style = document.createElement('style');
-          style.textContent = `
-          @keyframes spin {
-              0% { transform: rotate(0deg); }
-              100% { transform: rotate(360deg); }
-          }
-          .spinner {
-              animation: spin 1s linear infinite;
-          }
-          `;
-          document.head.appendChild(style);
+          // 初始刷新
+          refresh();
+          // 每10秒自动刷新一次
+          setInterval(refresh, 10000);
           </script>
           <%+footer%>
           EOF
-
-      - name: Create Controller
-        run: |
-          cat << 'EOF' > staging/usr/lib/lua/luci/controller/tailscale_web.lua
-          module("luci.controller.tailscale_web", package.seeall)
-          function index()
-              entry({"admin", "services", "tailscale_web"}, template("tailscale_web/index"), _("Tailscale"), 99)
-          end
-          EOF
-
-      - name: Build Package
-        run: |
-          cp shell/install-tailscale.sh staging/install.sh
-          chmod +x staging/install.sh
-          makeself --notemp staging "tailscale-${{ steps.v.outputs.tag }}-x86.run" "Tailscale" ./install.sh
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: "v${{ steps.v.outputs.tag }}"
-          name: "Tailscale-Console-v${{ steps.v.outputs.tag }}"
-          files: "*.run"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
