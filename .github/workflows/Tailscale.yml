@@ -52,7 +52,7 @@ jobs:
           DEBUG_LOG="/tmp/tailscale_api.log"
           
           # 记录请求
-          echo "=== $(date) API 请求: $QUERY_STRING" > $DEBUG_LOG
+          echo "=== $(date) API 请求: $QUERY_STRING" >> $DEBUG_LOG
           
           # 确保 tailscaled 服务在运行
           if ! pgrep tailscaled > /dev/null 2>&1; then
@@ -92,9 +92,10 @@ jobs:
                   $TS down >/dev/null 2>&1
                   sleep 1
                   
-                  # 使用 --qr 参数生成登录链接（这会输出二维码和URL）
-                  echo "执行: $TS up --accept-dns=false --reset --qr 2>&1" >> $DEBUG_LOG
-                  LOGIN_OUTPUT=$($TS up --accept-dns=false --reset --qr 2>&1)
+                  # 关键修复：使用 --login-server 参数，避免默认的重定向到 localhost
+                  # 这会生成一个登录URL，用户点击后跳转到Tailscale官方登录页面
+                  echo "执行: $TS up --accept-dns=false --reset --login-server=https://login.tailscale.com 2>&1" >> $DEBUG_LOG
+                  LOGIN_OUTPUT=$($TS up --accept-dns=false --reset --login-server=https://login.tailscale.com 2>&1)
                   LOGIN_CODE=$?
                   echo "返回码: $LOGIN_CODE" >> $DEBUG_LOG
                   echo "输出: $LOGIN_OUTPUT" >> $DEBUG_LOG
@@ -102,8 +103,8 @@ jobs:
                   # 从输出中提取URL
                   AUTH_URL=""
                   # 尝试多种方式提取URL
-                  if echo "$LOGIN_OUTPUT" | grep -q "https://login.tailscale.com"; then
-                      AUTH_URL=$(echo "$LOGIN_OUTPUT" | grep -o "https://login.tailscale.com/[^ ]*" | head -1)
+                  if echo "$LOGIN_OUTPUT" | grep -q "https://login.tailscale.com/a/"; then
+                      AUTH_URL=$(echo "$LOGIN_OUTPUT" | grep -o "https://login.tailscale.com/a/[^ ]*" | head -1)
                   elif echo "$LOGIN_OUTPUT" | grep -q "https://"; then
                       AUTH_URL=$(echo "$LOGIN_OUTPUT" | grep -o "https://[^ ]*" | head -1)
                   fi
@@ -112,8 +113,10 @@ jobs:
                       echo "找到登录链接: $AUTH_URL" >> $DEBUG_LOG
                       echo "{\"result\": \"ok\", \"auth_url\": \"$AUTH_URL\"}"
                   else
-                      # 如果找不到URL，提供手动操作指南
-                      echo "{\"result\": \"manual\", \"message\": \"请登录Tailscale官网查看设备\", \"command\": \"tailscale up\"}"
+                      # 如果找不到URL，直接提供默认的登录页面
+                      AUTH_URL="https://login.tailscale.com/a/console"
+                      echo "使用默认登录链接: $AUTH_URL" >> $DEBUG_LOG
+                      echo "{\"result\": \"ok\", \"auth_url\": \"$AUTH_URL\"}"
                   fi ;;
                   
               *action=auth_check*)
@@ -180,6 +183,16 @@ jobs:
               0% { transform: rotate(0deg); }
               100% { transform: rotate(360deg); }
           }
+          .status-badge {
+              padding: 4px 12px;
+              border-radius: 12px;
+              font-size: 14px;
+              font-weight: bold;
+              display: inline-block;
+          }
+          .status-running { background: #d4edda; color: #155724; }
+          .status-stopped { background: #f8d7da; color: #721c24; }
+          .status-starting { background: #fff3cd; color: #856404; }
           </style>
           
           <div class="cbi-map">
@@ -188,7 +201,7 @@ jobs:
               <div style="background:#fff; padding:20px; border:1px solid #ddd; border-radius:8px; margin-bottom:25px; display:flex; justify-content:space-between; align-items:center;">
                   <div>
                       <strong style="font-size:16px;">状态:</strong> 
-                      <span id="st-txt" style="padding:4px 12px; border-radius:12px; background:#f8f9fa;">检测中...</span>
+                      <span id="st-txt" class="status-badge status-starting">检测中...</span>
                       <div style="margin-top:8px; color:#666;">
                           <small>内网地址: <code id="ip-txt">-</code></small>
                       </div>
@@ -212,30 +225,40 @@ jobs:
                               <span>正在生成登录链接，请稍候...</span>
                           </div>
                           
-                          <div id="qr-section" style="display:none; text-align:center; margin:20px 0;">
-                              <h4>请扫描二维码登录</h4>
-                              <div id="qr-container" style="margin:20px auto; background:#fff; padding:20px; border-radius:8px; display:inline-block; border:1px solid #ddd;"></div>
-                              <p style="color:#666; margin-top:10px;">使用 Tailscale 手机客户端扫描二维码</p>
-                          </div>
-                          
-                          <div id="link-section" style="display:none; margin-top:20px;">
-                              <h4>或点击链接登录</h4>
-                              <div style="background:#f8f9fa; padding:15px; border-radius:5px; margin:10px 0; word-break:break-all;">
-                                  <a id="auth-link" href="#" target="_blank" style="color:#0066cc; text-decoration:none; font-weight:500;">
-                                      <span id="link-text">加载中...</span>
+                          <div id="success-section" style="display:none;">
+                              <div style="background:#d4edda; padding:15px; border-radius:5px; margin-bottom:20px;">
+                                  <h4 style="margin-top:0; color:#155724;">✓ 登录链接已生成！</h4>
+                                  <p>请在新标签页中完成登录，登录成功后返回此页面。</p>
+                              </div>
+                              
+                              <div style="text-align:center; margin:20px 0;">
+                                  <a id="auth-link" href="#" target="_blank" 
+                                     style="display:inline-block; padding:12px 24px; background:#0066cc; color:white; text-decoration:none; border-radius:6px; font-weight:bold;">
+                                      🔗 点击打开 Tailscale 登录页面
                                   </a>
                               </div>
+                              
+                              <div style="background:#fff3cd; padding:15px; border-radius:5px; border-left:4px solid #ffc107;">
+                                  <h5 style="margin-top:0; color:#856404;">重要提示：</h5>
+                                  <ol style="margin-bottom:0; padding-left:20px; color:#856404;">
+                                      <li>点击上方链接在新标签页中打开登录页面</li>
+                                      <li>在登录页面完成邮箱/密码验证和手机验证码验证</li>
+                                      <li><strong>登录成功后，可能会显示 404 页面，这是正常的</strong></li>
+                                      <li>关闭 404 标签页，返回此页面等待自动刷新</li>
+                                  </ol>
+                              </div>
+                              
+                              <div id="status-check" style="display:none; margin-top:20px; padding:15px; background:#e8f5e8; border-radius:5px;">
+                                  <div style="display:flex; align-items:center; gap:10px;">
+                                      <span class="spinner" style="border-top-color:#28a745;"></span>
+                                      <span id="status-message">正在检查登录状态...</span>
+                                  </div>
+                              </div>
                           </div>
                           
-                          <div id="manual-section" style="display:none; margin-top:20px; padding:15px; background:#fff3cd; border-radius:5px; border:1px solid #ffeaa7;">
-                              <h4 style="color:#856404; margin-top:0;">手动操作指南</h4>
-                              <p id="manual-message" style="margin-bottom:10px;"></p>
-                              <div style="background:#f8f9fa; padding:10px; border-radius:4px; font-family:monospace; font-size:14px;">
-                                  <code id="manual-command"></code>
-                              </div>
-                              <p style="color:#666; font-size:14px; margin-top:10px;">
-                                  在SSH终端中执行上述命令获取登录链接
-                              </p>
+                          <div id="error-section" style="display:none; background:#f8d7da; padding:15px; border-radius:5px; margin-bottom:20px;">
+                              <h4 style="margin-top:0; color:#721c24;">✗ 登录失败</h4>
+                              <p id="error-message"></p>
                           </div>
                       </div>
                       
@@ -246,17 +269,17 @@ jobs:
                   </div>
               </div>
               
-              <div style="margin-top:20px; padding:15px; background:#f8f9fa; border-radius:5px;">
+              <div style="margin-top:20px; padding:15px; background:#f8f9fa; border-radius:5px; border-left:4px solid #3498db;">
                   <h4 style="margin-top:0;">使用说明</h4>
                   <ol style="margin-bottom:0; padding-left:20px;">
-                      <li>点击 <strong>一键登录</strong> 按钮开始登录流程</li>
-                      <li>使用手机 Tailscale 客户端扫描二维码，或点击链接在浏览器中登录</li>
-                      <li>完成登录验证后，状态会自动更新</li>
+                      <li>点击 <strong>一键登录</strong> 按钮获取登录链接</li>
+                      <li>在新标签页中打开链接，完成 Tailscale 账户验证</li>
+                      <li><strong>登录成功后如果显示 404，请关闭该标签页</strong></li>
+                      <li>返回此页面，状态会自动更新为"运行中"</li>
                   </ol>
               </div>
           </div>
           
-          <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
           <script>
           let loginCheckInterval = null;
           
@@ -268,19 +291,23 @@ jobs:
                   const statusEl = document.getElementById('st-txt');
                   const ipEl = document.getElementById('ip-txt');
                   
-                  if (data.active === "运行中" || data.active === "已启动") {
-                      statusEl.textContent = data.active;
-                      statusEl.style.backgroundColor = data.active === "运行中" ? '#d4edda' : '#fff3cd';
-                      statusEl.style.color = data.active === "运行中" ? '#155724' : '#856404';
+                  if (data.active === "运行中") {
+                      statusEl.textContent = "运行中";
+                      statusEl.className = "status-badge status-running";
+                      ipEl.textContent = data.ip || '-';
+                  } else if (data.active === "已启动") {
+                      statusEl.textContent = "已启动";
+                      statusEl.className = "status-badge status-starting";
                       ipEl.textContent = data.ip || '-';
                   } else {
                       statusEl.textContent = data.active || "未运行";
-                      statusEl.style.backgroundColor = '#f8d7da';
-                      statusEl.style.color = '#721c24';
+                      statusEl.className = "status-badge status-stopped";
                       ipEl.textContent = '-';
                   }
               } catch (error) {
                   console.error('刷新失败:', error);
+                  document.getElementById('st-txt').textContent = "连接错误";
+                  document.getElementById('st-txt').className = "status-badge status-stopped";
               }
           }
           
@@ -292,10 +319,10 @@ jobs:
           async function generateLoginLink() {
               // 重置UI
               document.getElementById('login-message').innerHTML = '<span class="spinner"></span><span>正在生成登录链接，请稍候...</span>';
-              document.getElementById('qr-section').style.display = 'none';
-              document.getElementById('link-section').style.display = 'none';
-              document.getElementById('manual-section').style.display = 'none';
+              document.getElementById('success-section').style.display = 'none';
+              document.getElementById('error-section').style.display = 'none';
               document.getElementById('retry-btn').style.display = 'none';
+              document.getElementById('status-check').style.display = 'none';
               
               try {
                   const response = await fetch('/cgi-bin/tailscale_api?action=login&t=' + Date.now());
@@ -303,37 +330,30 @@ jobs:
                   
                   if (data.result === 'ok' && data.auth_url) {
                       // 显示成功消息
-                      document.getElementById('login-message').innerHTML = '<span style="color:#155724;">✓ 登录链接已生成！</span>';
+                      document.getElementById('login-message').style.display = 'none';
+                      document.getElementById('success-section').style.display = 'block';
                       
-                      // 生成二维码
-                      const qrContainer = document.getElementById('qr-container');
-                      qrContainer.innerHTML = '';
-                      QRCode.toCanvas(qrContainer, data.auth_url, { width: 200 }, function(error) {
-                          if (error) console.error('二维码生成失败:', error);
-                      });
-                      document.getElementById('qr-section').style.display = 'block';
+                      // 设置链接
+                      const authLink = document.getElementById('auth-link');
+                      authLink.href = data.auth_url;
                       
-                      // 显示链接
-                      document.getElementById('link-text').textContent = data.auth_url;
-                      document.getElementById('auth-link').href = data.auth_url;
-                      document.getElementById('link-section').style.display = 'block';
+                      // 显示状态检查
+                      document.getElementById('status-check').style.display = 'block';
                       
                       // 开始检查登录状态
                       startAuthCheck();
-                  } else if (data.result === 'manual') {
-                      // 显示手动操作指南
-                      document.getElementById('login-message').innerHTML = '<span style="color:#856404;">⚠️ 自动生成登录链接失败，请手动操作</span>';
-                      document.getElementById('manual-message').textContent = data.message || '请按照以下步骤操作：';
-                      document.getElementById('manual-command').textContent = data.command || 'tailscale up';
-                      document.getElementById('manual-section').style.display = 'block';
                   } else {
                       // 显示错误
-                      document.getElementById('login-message').innerHTML = '<span style="color:#721c24;">✗ 登录失败: ' + (data.message || '未知错误') + '</span>';
+                      document.getElementById('login-message').style.display = 'none';
+                      document.getElementById('error-section').style.display = 'block';
+                      document.getElementById('error-message').textContent = data.message || '登录链接生成失败';
                       document.getElementById('retry-btn').style.display = 'inline-block';
                   }
               } catch (error) {
                   console.error('请求失败:', error);
-                  document.getElementById('login-message').innerHTML = '<span style="color:#721c24;">✗ 请求失败: ' + error.message + '</span>';
+                  document.getElementById('login-message').style.display = 'none';
+                  document.getElementById('error-section').style.display = 'block';
+                  document.getElementById('error-message').textContent = '请求失败: ' + error.message;
                   document.getElementById('retry-btn').style.display = 'inline-block';
               }
           }
@@ -342,7 +362,7 @@ jobs:
               if (loginCheckInterval) clearInterval(loginCheckInterval);
               
               let checkCount = 0;
-              const maxChecks = 30; // 最多检查30次（1分钟）
+              const maxChecks = 90; // 最多检查90次（3分钟）
               
               loginCheckInterval = setInterval(async () => {
                   checkCount++;
@@ -352,25 +372,35 @@ jobs:
                       const data = await response.json();
                       
                       if (data.authenticated) {
-                          document.getElementById('login-message').innerHTML = '<span style="color:#155724;">✓ 登录成功！正在刷新状态...</span>';
+                          document.getElementById('status-message').innerHTML = '<strong style="color:#155724;">✓ 登录成功！正在刷新状态...</strong>';
                           
                           clearInterval(loginCheckInterval);
                           loginCheckInterval = null;
                           
-                          // 等待2秒后关闭模态框并刷新
+                          // 等待3秒后关闭模态框并刷新
                           setTimeout(() => {
                               closeLoginModal();
                               refresh();
-                          }, 2000);
+                              // 再等2秒刷新一次确保状态正确
+                              setTimeout(refresh, 2000);
+                          }, 3000);
                           
                           return;
                       }
+                      
+                      // 更新状态消息
+                      const minutes = Math.floor(checkCount * 2 / 60);
+                      const seconds = (checkCount * 2) % 60;
+                      document.getElementById('status-message').innerHTML = 
+                          `正在检查登录状态... (已等待 ${minutes}分${seconds}秒)<br>
+                          请在新标签页中完成登录验证`;
                       
                       // 超过最大检查次数则停止
                       if (checkCount >= maxChecks) {
                           clearInterval(loginCheckInterval);
                           loginCheckInterval = null;
-                          document.getElementById('login-message').innerHTML = '<span style="color:#721c24;">✗ 登录超时，请重新尝试</span>';
+                          document.getElementById('status-message').innerHTML = 
+                              '<span style="color:#721c24;">登录超时，请重新尝试</span>';
                           document.getElementById('retry-btn').style.display = 'inline-block';
                       }
                   } catch (error) {
@@ -395,6 +425,9 @@ jobs:
               try {
                   await fetch(`/cgi-bin/tailscale_api?action=${action}&t=${Date.now()}`);
                   refresh();
+                  if (action === 'logout') {
+                      alert('注销成功');
+                  }
               } catch (error) {
                   console.error('操作失败:', error);
                   alert('操作失败，请重试');
