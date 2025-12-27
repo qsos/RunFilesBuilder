@@ -1,12 +1,7 @@
-name: Build Tailscale Advanced Console
+name: Build Tailscale Official UI Mode
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: '指定版本 (留空则自动获取最新)'
-        required: false
-        default: ''
 
 permissions:
   contents: write
@@ -18,225 +13,85 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare Tools
-        run: sudo apt-get update && sudo apt-get install -y makeself jq curl
-
-      - name: Get Version
-        id: v
+      - name: Prepare Workspace
         run: |
-          if [ -z "${{ github.event.inputs.version }}" ]; then
-            VERSION=$(curl -sL https://api.github.com/repos/tailscale/tailscale/releases/latest | jq -r ".tag_name" | sed 's/v//')
-          else
-            VERSION=${{ github.event.inputs.version }}
-          fi
-          echo "tag=$VERSION" >> $GITHUB_OUTPUT
+          mkdir -p staging/bin \
+                   staging/www/cgi-bin/ \
+                   staging/www/luci-static/resources/view/ \
+                   staging/usr/lib/lua/luci/controller/
+          sudo apt-get update && sudo apt-get install -y makeself jq curl
 
-      - name: Download Binary
+      - name: Download Tailscale Binary
         run: |
-          VER=${{ steps.v.outputs.tag }}
-          curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${VER}_amd64.tgz" -o ts.tgz
+          VERSION=$(curl -sL https://api.github.com/repos/tailscale/tailscale/releases/latest | jq -r ".tag_name" | sed 's/v//')
+          curl -fSL "https://pkgs.tailscale.com/stable/tailscale_${VERSION}_amd64.tgz" -o ts.tgz
           tar xzf ts.tgz
-          mkdir -p staging/bin staging/usr/lib/lua/luci/controller/ staging/usr/lib/lua/luci/view/tailscale_web/ staging/www/cgi-bin/
           mv tailscale_*/tailscale staging/bin/
           mv tailscale_*/tailscaled staging/bin/
-          rm -rf ts.tgz tailscale_*
 
-      - name: Create Backend API
+      - name: Process Official JS (Fix Login Button)
         run: |
-          cat > staging/www/cgi-bin/tailscale_api << 'EOF'
+          # 1. 复制你提供给我的那段官方 tailscale.js 到 staging 目录
+          # 注意：确保你的仓库根目录下有名为 tailscale.js 的文件
+          cp tailscale.js staging/www/luci-static/resources/view/tailscale.js
+          
+          # 2. 使用 sed 暴力修改 JS，将 RPC 替换为直接 Fetch，彻底解决 404
+          # 强制将 callGetStatus 映射到我们的 API
+          sed -i "s|rpc.declare({object:'tailscale',method:'get_status'})|function(){return fetch('/cgi-bin/tailscale_api?action=status').then(r=>r.json())}|g" staging/www/luci-static/resources/view/tailscale.js
+          
+          # 强制将 callDoLogout 映射到我们的 API
+          sed -i "s|rpc.declare({object:'tailscale',method:'do_logout'})|function(){return fetch('/cgi-bin/tailscale_api?action=logout').then(r=>r.json())}|g" staging/www/luci-static/resources/view/tailscale.js
+
+      - name: Create Backend API (适配官方格式)
+        run: |
+          cat << 'EOF' > staging/www/cgi-bin/tailscale_api
           #!/bin/sh
           echo "Content-type: application/json"
           echo ""
-          
           TS="/bin/tailscale"
-          
           case "$QUERY_STRING" in
-              *action=status*)
+              action=status)
                   ST=$($TS status --json 2>/dev/null)
-                  if [ $? -ne 0 ] || [ -z "$ST" ]; then 
-                      echo "{\"active\": \"未运行\", \"ip\": \"-\", \"devices\": []}"
+                  # 提取状态。如果是空或者未运行，给官方 JS 返回 'logout' 字符串
+                  BACKEND_ST=$(echo "$ST" | jq -r '.BackendState // "logout"')
+                  if [ "$BACKEND_ST" != "Running" ]; then
+                      # 抓取最新的新鲜授权链接
+                      URL=$($TS up --accept-dns=false --reset 2>&1 | grep -o 'https://login.tailscale.com/a/[^ ]*' | head -n 1)
+                      # 构造官方 JS 预期的 JSON 结构
+                      echo "{\"status\": \"logout\", \"health\": \"\", \"url\": \"$URL\", \"peers\": {}}"
                   else
-                      IP=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0] // "-"')
-                      DEVICES=$(echo "$ST" | jq -c '.Peer | to_entries | map({hostname: .value.HostName, ip: (.value.TailscaleIPs[0] // "-"), os: (.value.OS // "-"), version: (.value.Version // "-"), online: .value.Online})')
-                      echo "{\"active\": \"运行中\", \"ip\": \"$IP\", \"devices\": $DEVICES}"
+                      IPV4=$(echo "$ST" | jq -r '.Self.TailscaleIPs[0] // "-"')
+                      VERSION=$(echo "$ST" | jq -r '.Version // "-"')
+                      # 返回官方 JS 渲染表格所需的数据
+                      echo "{\"status\": \"running\", \"version\": \"$VERSION\", \"ipv4\": \"$IPV4\", \"peers\": {}}"
                   fi ;;
-                  
-              *action=login*)
-                  # 简单的登录命令，会打开浏览器或输出登录链接
-                  LOGIN_OUTPUT=$($TS up --accept-dns=false --reset 2>&1)
-                  # 尝试从输出中提取URL
-                  AUTH_URL=$(echo "$LOGIN_OUTPUT" | grep -o 'https://[^ ]*' | head -1)
-                  if [ -n "$AUTH_URL" ]; then
-                      echo "{\"result\": \"ok\", \"url\": \"$AUTH_URL\"}"
-                  else
-                      # 如果没有输出URL，可能已经自动打开了浏览器
-                      echo "{\"result\": \"ok\", \"url\": \"https://login.tailscale.com/admin/machines\"}"
-                  fi ;;
-                  
-              *action=logout*)
+              action=logout)
                   $TS logout >/dev/null 2>&1
-                  echo "{\"result\": \"ok\"}" ;;
-                  
-              *)
-                  echo "{\"error\": \"未知操作: $QUERY_STRING\"}" ;;
+                  echo "{\"success\": true}" ;;
           esac
           EOF
           chmod 755 staging/www/cgi-bin/tailscale_api
 
-      - name: Create UI
+      - name: Create Simple Controller
         run: |
-          cat > staging/usr/lib/lua/luci/view/tailscale_web/index.htm << 'EOF'
-          <%+header%>
-          <div class="cbi-map">
-              <h2 style="margin-bottom:20px">Tailscale 控制面板</h2>
-              
-              <div style="background:#fff; padding:20px; border:1px solid #ddd; border-radius:8px; margin-bottom:25px;">
-                  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
-                      <div>
-                          <strong style="font-size:16px;">状态:</strong> 
-                          <span id="st-txt" style="padding:4px 12px; border-radius:12px; background:#f8f9fa;">检测中...</span>
-                          <div style="margin-top:8px; color:#666;">
-                              <small>内网地址: <code id="ip-txt">-</code></small>
-                          </div>
-                      </div>
-                      <div style="display:flex; gap:10px;">
-                          <button class="cbi-button cbi-button-apply" onclick="doLogin()" style="padding:10px 20px;">
-                              一键登录
-                          </button>
-                          <button class="cbi-button cbi-button-reset" onclick="doLogout()" style="padding:10px 20px;">
-                              注销
-                          </button>
-                      </div>
-                  </div>
-                  
-                  <div id="devices-container" style="display:none;">
-                      <h4 style="margin-top:20px; margin-bottom:10px;">设备列表</h4>
-                      <div class="table" style="border:1px solid #eee; border-radius:5px; overflow:hidden;">
-                          <div class="tr" style="background:#f8f9fa; font-weight:bold; display:grid; grid-template-columns:2fr 1fr 1fr 1fr; border-bottom:1px solid #eee;">
-                              <div class="td" style="padding:10px;">设备名称</div>
-                              <div class="td" style="padding:10px;">内网 IP</div>
-                              <div class="td" style="padding:10px;">系统/版本</div>
-                              <div class="td" style="padding:10px;">状态</div>
-                          </div>
-                          <div id="dev-list" style="background:#fff;"></div>
-                      </div>
-                  </div>
-              </div>
-              
-              <div style="background:#f8f9fa; padding:15px; border-radius:5px; border-left:4px solid #3498db;">
-                  <h4 style="margin-top:0;">使用说明</h4>
-                  <ol style="margin-bottom:0; padding-left:20px;">
-                      <li>点击 <strong>一键登录</strong> 按钮打开 Tailscale 登录页面</li>
-                      <li>在登录页面完成邮箱/密码验证</li>
-                      <li><strong>重要：登录成功后如果显示 404，请直接关闭该页面</strong></li>
-                      <li>返回此页面，稍等几秒钟会自动刷新状态</li>
-                  </ol>
-              </div>
-          </div>
-          
-          <script>
-          function refresh() {
-              fetch('/cgi-bin/tailscale_api?action=status')
-                  .then(r => r.json())
-                  .then(data => {
-                      const st = document.getElementById('st-txt');
-                      const ip = document.getElementById('ip-txt');
-                      
-                      if (data.active === "运行中") {
-                          st.textContent = "运行中";
-                          st.style.background = "#d4edda";
-                          st.style.color = "#155724";
-                          ip.textContent = data.ip || '-';
-                          
-                          // 显示设备列表
-                          document.getElementById('devices-container').style.display = 'block';
-                          let html = '';
-                          if (data.devices && data.devices.length > 0) {
-                              data.devices.forEach(device => {
-                                  html += `<div class="tr" style="display:grid; grid-template-columns:2fr 1fr 1fr 1fr; border-bottom:1px solid #eee;">
-                                      <div class="td" style="padding:10px;">${device.hostname || '-'}</div>
-                                      <div class="td" style="padding:10px;"><code>${device.ip || '-'}</code></div>
-                                      <div class="td" style="padding:10px; font-size:12px;">${device.os || '-'}<br>${device.version || '-'}</div>
-                                      <div class="td" style="padding:10px;">${device.online ? '<span style="color:#28a745">在线</span>' : '<span style="color:#999">离线</span>'}</div>
-                                  </div>`;
-                              });
-                          }
-                          document.getElementById('dev-list').innerHTML = html;
-                      } else {
-                          st.textContent = data.active || "未运行";
-                          st.style.background = "#f8d7da";
-                          st.style.color = "#721c24";
-                          ip.textContent = '-';
-                          document.getElementById('devices-container').style.display = 'none';
-                      }
-                  })
-                  .catch(err => {
-                      console.error('刷新失败:', err);
-                  });
-          }
-          
-          function doLogin() {
-              fetch('/cgi-bin/tailscale_api?action=login')
-                  .then(r => r.json())
-                  .then(data => {
-                      if (data.result === 'ok' && data.url) {
-                          // 打开登录页面
-                          window.open(data.url, '_blank');
-                          alert('已打开登录页面，请完成登录。\n\n注意：登录成功后如果显示404页面，请直接关闭它。');
-                          
-                          // 登录后每5秒刷新一次状态，持续30秒
-                          let checks = 0;
-                          const maxChecks = 6; // 30秒
-                          const checkInterval = setInterval(() => {
-                              refresh();
-                              checks++;
-                              if (checks >= maxChecks) {
-                                  clearInterval(checkInterval);
-                              }
-                          }, 5000);
-                      }
-                  });
-          }
-          
-          function doLogout() {
-              if (confirm('确定要注销 Tailscale 吗？')) {
-                  fetch('/cgi-bin/tailscale_api?action=logout')
-                      .then(r => r.json())
-                      .then(() => {
-                          refresh();
-                          alert('注销成功');
-                      });
-              }
-          }
-          
-          // 初始刷新
-          refresh();
-          // 每30秒刷新一次
-          setInterval(refresh, 30000);
-          </script>
-          <%+footer%>
-          EOF
-
-      - name: Create Controller
-        run: |
-          cat > staging/usr/lib/lua/luci/controller/tailscale_web.lua << 'EOF'
-          module("luci.controller.tailscale_web", package.seeall)
+          cat << 'EOF' > staging/usr/lib/lua/luci/controller/tailscale.lua
+          module("luci.controller.tailscale", package.seeall)
           function index()
-              entry({"admin", "services", "tailscale_web"}, template("tailscale_web/index"), _("Tailscale"), 99)
+              entry({"admin", "services", "tailscale"}, template("tailscale_web/index"), _("Tailscale"), 99)
           end
           EOF
 
-      - name: Build Package
+      - name: Build Setup Package
         run: |
+          # 确保安装脚本已经更新为适配官方路径的版本
           cp shell/install-tailscale.sh staging/install.sh
           chmod +x staging/install.sh
-          makeself --notemp staging "tailscale-${{ steps.v.outputs.tag }}-x86.run" "Tailscale" ./install.sh
+          makeself staging "tailscale-setup.run" "Tailscale Official UI Patch" ./install.sh
 
-      - name: Create Release
+      - name: Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "v${{ steps.v.outputs.tag }}"
-          name: "Tailscale-Console-v${{ steps.v.outputs.tag }}"
+          tag_name: "v${{ github.run_number }}"
           files: "*.run"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
