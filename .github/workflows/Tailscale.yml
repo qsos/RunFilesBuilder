@@ -1,269 +1,122 @@
-      - name: Create UI
-        run: |
-          cat << 'EOF' > staging/usr/lib/lua/luci/view/tailscale_web/index.htm
-          <%+header%>
-          <style>
-          .login-modal {
-              display: none;
-              position: fixed;
-              top: 0;
-              left: 0;
-              width: 100%;
-              height: 100%;
-              background: rgba(0,0,0,0.5);
-              z-index: 1000;
-              justify-content: center;
-              align-items: center;
-          }
-          .login-box {
-              background: #fff;
-              padding: 25px;
-              border-radius: 10px;
-              max-width: 600px;
-              width: 90%;
-              max-height: 80vh;
-              overflow-y: auto;
-          }
-          .spinner {
-              width: 24px;
-              height: 24px;
-              border: 3px solid #f3f3f3;
-              border-top: 3px solid #3498db;
-              border-radius: 50%;
-              animation: spin 1s linear infinite;
-              display: inline-block;
-              vertical-align: middle;
-              margin-right: 10px;
-          }
-          @keyframes spin {
-              0% { transform: rotate(0deg); }
-              100% { transform: rotate(360deg); }
-          }
-          </style>
-          
-          <div class="cbi-map">
-              <h2 style="margin-bottom:20px">Tailscale 控制面板</h2>
-              
-              <div style="background:#fff; padding:20px; border:1px solid #ddd; border-radius:8px; margin-bottom:25px; display:flex; justify-content:space-between; align-items:center;">
-                  <div>
-                      <strong style="font-size:16px;">状态:</strong> 
-                      <span id="st-txt" style="padding:4px 12px; border-radius:12px; background:#f8f9fa;">检测中...</span>
-                      <div style="margin-top:8px; color:#666;">
-                          <small>内网地址: <code id="ip-txt">-</code></small>
-                      </div>
-                  </div>
-                  <div style="display:flex; gap:10px;">
-                      <button class="cbi-button cbi-button-apply" id="login-btn" onclick="startLogin()" style="padding:10px 20px;">
-                          <span style="font-weight:bold;">⚡ 一键登录</span>
-                      </button>
-                      <button class="cbi-button cbi-button-reset" onclick="doAction('logout')" style="padding:10px 20px;">
-                          注销
-                      </button>
-                  </div>
-              </div>
-              
-              <div id="login-modal" class="login-modal">
-                  <div class="login-box">
-                      <h3 style="margin-top:0; border-bottom:1px solid #eee; padding-bottom:10px;">Tailscale 登录</h3>
-                      <div style="margin:20px 0;">
-                          <div id="login-message" style="padding:15px; background:#f8f9fa; border-radius:5px; margin-bottom:20px;">
-                              <span class="spinner"></span>
-                              <span>正在生成登录链接，请稍候...</span>
-                          </div>
-                          
-                          <div id="qr-section" style="display:none; text-align:center; margin:20px 0;">
-                              <h4>请扫描二维码登录</h4>
-                              <div id="qr-container" style="margin:20px auto; background:#fff; padding:20px; border-radius:8px; display:inline-block; border:1px solid #ddd;"></div>
-                              <p style="color:#666; margin-top:10px;">使用 Tailscale 手机客户端扫描二维码</p>
-                          </div>
-                          
-                          <div id="link-section" style="display:none; margin-top:20px;">
-                              <h4>或点击链接登录</h4>
-                              <div style="background:#f8f9fa; padding:15px; border-radius:5px; margin:10px 0; word-break:break-all;">
-                                  <a id="auth-link" href="#" target="_blank" style="color:#0066cc; text-decoration:none; font-weight:500;">
-                                      <span id="link-text">加载中...</span>
-                                  </a>
-                              </div>
-                          </div>
-                          
-                          <div id="manual-section" style="display:none; margin-top:20px; padding:15px; background:#fff3cd; border-radius:5px; border:1px solid #ffeaa7;">
-                              <h4 style="color:#856404; margin-top:0;">手动操作指南</h4>
-                              <p id="manual-message" style="margin-bottom:10px;"></p>
-                              <div style="background:#f8f9fa; padding:10px; border-radius:4px; font-family:monospace; font-size:14px;">
-                                  <code id="manual-command"></code>
-                              </div>
-                              <p style="color:#666; font-size:14px; margin-top:10px;">
-                                  在SSH终端中执行上述命令获取登录链接
-                              </p>
-                          </div>
-                      </div>
-                      
-                      <div style="text-align:right; border-top:1px solid #eee; padding-top:20px;">
-                          <button class="cbi-button" onclick="closeLoginModal()" style="padding:8px 20px;">关闭</button>
-                          <button id="retry-btn" class="cbi-button cbi-button-apply" onclick="generateLoginLink()" style="display:none; padding:8px 20px; margin-left:10px;">重试</button>
-                      </div>
-                  </div>
-              </div>
-              
-              <div style="margin-top:20px; padding:15px; background:#f8f9fa; border-radius:5px;">
-                  <h4 style="margin-top:0;">使用说明</h4>
-                  <ol style="margin-bottom:0; padding-left:20px;">
-                      <li>点击 <strong>一键登录</strong> 按钮开始登录流程</li>
-                      <li>使用手机 Tailscale 客户端扫描二维码，或点击链接在浏览器中登录</li>
-                      <li>完成登录验证后，状态会自动更新</li>
-                  </ol>
-              </div>
-          </div>
-          
-          <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
-          <script>
-          let loginCheckInterval = null;
-          
-          async function refresh() {
-              try {
-                  const response = await fetch('/cgi-bin/tailscale_api?action=status&t=' + Date.now());
-                  const data = await response.json();
-                  
-                  const statusEl = document.getElementById('st-txt');
-                  const ipEl = document.getElementById('ip-txt');
-                  
-                  if (data.active === "运行中" || data.active === "已启动") {
-                      statusEl.textContent = data.active;
-                      statusEl.style.backgroundColor = data.active === "运行中" ? '#d4edda' : '#fff3cd';
-                      statusEl.style.color = data.active === "运行中" ? '#155724' : '#856404';
-                      ipEl.textContent = data.ip || '-';
-                  } else {
-                      statusEl.textContent = data.active || "未运行";
-                      statusEl.style.backgroundColor = '#f8d7da';
-                      statusEl.style.color = '#721c24';
-                      ipEl.textContent = '-';
-                  }
-              } catch (error) {
-                  console.error('刷新失败:', error);
-              }
-          }
-          
-          function startLogin() {
-              document.getElementById('login-modal').style.display = 'flex';
-              generateLoginLink();
-          }
-          
-          async function generateLoginLink() {
-              // 重置UI
-              document.getElementById('login-message').innerHTML = '<span class="spinner"></span><span>正在生成登录链接，请稍候...</span>';
-              document.getElementById('qr-section').style.display = 'none';
-              document.getElementById('link-section').style.display = 'none';
-              document.getElementById('manual-section').style.display = 'none';
-              document.getElementById('retry-btn').style.display = 'none';
-              
-              try {
-                  const response = await fetch('/cgi-bin/tailscale_api?action=login&t=' + Date.now());
-                  const data = await response.json();
-                  
-                  if (data.result === 'ok' && data.auth_url) {
-                      // 显示成功消息
-                      document.getElementById('login-message').innerHTML = '<span style="color:#155724;">✓ 登录链接已生成！</span>';
-                      
-                      // 生成二维码
-                      const qrContainer = document.getElementById('qr-container');
-                      qrContainer.innerHTML = '';
-                      QRCode.toCanvas(qrContainer, data.auth_url, { width: 200 }, function(error) {
-                          if (error) console.error('二维码生成失败:', error);
-                      });
-                      document.getElementById('qr-section').style.display = 'block';
-                      
-                      // 显示链接
-                      document.getElementById('link-text').textContent = data.auth_url;
-                      document.getElementById('auth-link').href = data.auth_url;
-                      document.getElementById('link-section').style.display = 'block';
-                      
-                      // 开始检查登录状态
-                      startAuthCheck();
-                  } else if (data.result === 'manual') {
-                      // 显示手动操作指南
-                      document.getElementById('login-message').innerHTML = '<span style="color:#856404;">⚠️ 自动生成登录链接失败，请手动操作</span>';
-                      document.getElementById('manual-message').textContent = data.message || '请按照以下步骤操作：';
-                      document.getElementById('manual-command').textContent = data.command || 'tailscale up';
-                      document.getElementById('manual-section').style.display = 'block';
-                  } else {
-                      // 显示错误
-                      document.getElementById('login-message').innerHTML = '<span style="color:#721c24;">✗ 登录失败: ' + (data.message || '未知错误') + '</span>';
-                      document.getElementById('retry-btn').style.display = 'inline-block';
-                  }
-              } catch (error) {
-                  console.error('请求失败:', error);
-                  document.getElementById('login-message').innerHTML = '<span style="color:#721c24;">✗ 请求失败: ' + error.message + '</span>';
-                  document.getElementById('retry-btn').style.display = 'inline-block';
-              }
-          }
-          
-          function startAuthCheck() {
-              if (loginCheckInterval) clearInterval(loginCheckInterval);
-              
-              let checkCount = 0;
-              const maxChecks = 30; // 最多检查30次（1分钟）
-              
-              loginCheckInterval = setInterval(async () => {
-                  checkCount++;
-                  
-                  try {
-                      const response = await fetch('/cgi-bin/tailscale_api?action=auth_check&t=' + Date.now());
-                      const data = await response.json();
-                      
-                      if (data.authenticated) {
-                          document.getElementById('login-message').innerHTML = '<span style="color:#155724;">✓ 登录成功！正在刷新状态...</span>';
-                          
-                          clearInterval(loginCheckInterval);
-                          loginCheckInterval = null;
-                          
-                          // 等待2秒后关闭模态框并刷新
-                          setTimeout(() => {
-                              closeLoginModal();
-                              refresh();
-                          }, 2000);
-                          
-                          return;
-                      }
-                      
-                      // 超过最大检查次数则停止
-                      if (checkCount >= maxChecks) {
-                          clearInterval(loginCheckInterval);
-                          loginCheckInterval = null;
-                          document.getElementById('login-message').innerHTML = '<span style="color:#721c24;">✗ 登录超时，请重新尝试</span>';
-                          document.getElementById('retry-btn').style.display = 'inline-block';
-                      }
-                  } catch (error) {
-                      console.error('状态检查失败:', error);
-                  }
-              }, 2000); // 每2秒检查一次
-          }
-          
-          function closeLoginModal() {
-              document.getElementById('login-modal').style.display = 'none';
-              if (loginCheckInterval) {
-                  clearInterval(loginCheckInterval);
-                  loginCheckInterval = null;
-              }
-          }
-          
-          async function doAction(action) {
-              if (action === 'logout' && !confirm('确定要注销 Tailscale 吗？')) {
-                  return;
-              }
-              
-              try {
-                  await fetch(`/cgi-bin/tailscale_api?action=${action}&t=${Date.now()}`);
-                  refresh();
-              } catch (error) {
-                  console.error('操作失败:', error);
-                  alert('操作失败，请重试');
-              }
-          }
-          
-          // 初始刷新
-          refresh();
-          // 每10秒自动刷新一次
-          setInterval(refresh, 10000);
-          </script>
-          <%+footer%>
-          EOF
+#!/bin/sh
+
+set -e
+
+echo "========================================"
+echo "开始安装 Tailscale 控制面板"
+echo "========================================"
+
+# 1. 清理旧进程
+echo "步骤 1/7: 清理旧进程..."
+killall -9 tailscale tailscaled 2>/dev/null || true
+/etc/init.d/tailscaled stop 2>/dev/null || true
+sleep 2
+
+# 2. 创建必要的目录结构
+echo "步骤 2/7: 创建目录结构..."
+mkdir -p /bin /usr/sbin /www/cgi-bin /usr/lib/lua/luci/view/tailscale_web
+mkdir -p /etc/tailscale /var/run/tailscale
+chmod 755 /etc/tailscale /var/run/tailscale
+
+# 3. 安装二进制文件
+echo "步骤 3/7: 安装二进制文件..."
+cp -f bin/tailscale /bin/tailscale
+cp -f bin/tailscaled /bin/tailscaled
+cp -f bin/tailscale /usr/sbin/tailscale
+cp -f bin/tailscaled /usr/sbin/tailscaled
+
+# 4. 安装 Web 界面文件
+echo "步骤 4/7: 安装 Web 界面文件..."
+cp -f www/cgi-bin/tailscale_api /www/cgi-bin/
+cp -f usr/lib/lua/luci/controller/tailscale_web.lua /usr/lib/lua/luci/controller/
+cp -f usr/lib/lua/luci/view/tailscale_web/index.htm /usr/lib/lua/luci/view/tailscale_web/
+
+# 5. 设置正确的权限
+echo "步骤 5/7: 设置文件权限..."
+chmod 755 /bin/tailscale /bin/tailscaled
+chmod 755 /usr/sbin/tailscale /usr/sbin/tailscaled
+chmod 755 /www/cgi-bin/tailscale_api
+chmod 644 /usr/lib/lua/luci/controller/tailscale_web.lua
+chmod 644 /usr/lib/lua/luci/view/tailscale_web/index.htm
+
+# 6. 创建服务配置文件
+echo "步骤 6/7: 配置服务..."
+cat << 'EOF' > /etc/init.d/tailscaled
+#!/bin/sh /etc/rc.common
+START=99
+USE_PROCD=1
+
+start_service() {
+    procd_open_instance
+    procd_set_param command /bin/tailscaled \
+        --state=/etc/tailscale/tailscaled.state \
+        --socket=/var/run/tailscale/tailscaled.sock \
+        --port=41641
+    procd_set_param respawn
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
+EOF
+
+chmod 755 /etc/init.d/tailscaled
+
+# 7. 启动服务和初始化
+echo "步骤 7/7: 启动服务..."
+
+# 启用服务
+/etc/init.d/tailscaled enable
+
+# 创建初始状态文件（如果不存在）
+if [ ! -f /etc/tailscale/tailscaled.state ]; then
+    echo "初始化状态文件..."
+    touch /etc/tailscale/tailscaled.state
+    chmod 600 /etc/tailscale/tailscaled.state
+fi
+
+# 启动服务
+echo "启动 tailscaled 服务..."
+/etc/init.d/tailscaled start
+
+# 等待服务启动
+echo "等待服务启动..."
+for i in $(seq 1 10); do
+    if pgrep tailscaled > /dev/null 2>&1; then
+        echo "✓ tailscaled 服务已启动"
+        break
+    fi
+    echo "等待中... ($i/10)"
+    sleep 1
+done
+
+# 重启 Web 服务器
+echo "重启 Web 服务器..."
+if [ -f /etc/init.d/uhttpd ]; then
+    /etc/init.d/uhttpd restart 2>/dev/null || /etc/init.d/uhttpd reload 2>/dev/null || true
+fi
+
+# 清理临时文件
+rm -rf /tmp/luci-*
+
+echo ""
+echo "========================================"
+echo "安装完成！"
+echo "========================================"
+echo ""
+echo "现在你可以："
+echo "1. 刷新浏览器页面"
+echo "2. 进入 服务 → Tailscale"
+echo "3. 点击'一键登录'按钮开始使用"
+echo ""
+echo "如果登录失败，请检查："
+echo "- 系统日志: logread | grep tailscale"
+echo "- API 日志: cat /tmp/tailscale_api.log"
+echo "========================================"
+
+# 等待2秒再检查一次服务状态
+sleep 2
+if pgrep tailscaled > /dev/null 2>&1; then
+    echo "✓ 服务运行正常"
+else
+    echo "⚠️ 服务可能未启动，请手动执行: /etc/init.d/tailscaled start"
+fi
