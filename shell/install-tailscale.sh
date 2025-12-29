@@ -1,29 +1,25 @@
 #!/bin/sh
 
 # 1. 停止旧服务
-/etc/init.d/tailscaled stop 2>/dev/null
+/etc/init.d/tailscale stop 2>/dev/null
+killall -9 tailscale tailscaled 2>/dev/null
 
-# 2. 创建官方路径
-mkdir -p /usr/lib/lua/luci/controller/
-mkdir -p /www/luci-static/resources/view/
+# 2. 1:1 物理路径覆盖
+cp -rf usr etc www /
 
-# 3. 【核心步骤】将你发给我的代码保存为官方 JS 文件
-# 注意：这里假设你已经把刚才发我的代码存成了仓库里的 tailscale.js
-cp -f tailscale.js /www/luci-static/resources/view/tailscale.js
+# 3. 赋予核心权限
+chmod 755 /usr/sbin/tailscale*
+chmod 755 /usr/libexec/rpcd/tailscale
+chmod 755 /etc/init.d/tailscale
 
-# 4. 创建一个“中转控制中心”，让它支持官方 JS 调用
-cat << 'EOF' > /usr/lib/lua/luci/controller/tailscale.lua
-module("luci.controller.tailscale", package.seeall)
-function index()
-    -- 注册网页菜单
-    entry({"admin", "services", "tailscale"}, alias("admin", "services", "tailscale", "index"), _("Tailscale"), 99)
-    entry({"admin", "services", "tailscale", "index"}, view("tailscale"), _("Tailscale"), 1)
-end
-EOF
+# 4. 重启系统接口
+/etc/init.d/rpcd restart
+/etc/init.d/tailscale enable
+/etc/init.d/tailscale restart
 
-# 5. 权限与重启
-chmod 755 /bin/tailscale*
-/etc/init.d/uhttpd restart
+# 5. 强制清空网页缓存
 rm -rf /tmp/luci-indexcache /tmp/luci-modulecache/*
 
-echo "官方架构适配完成！请刷新页面。"
+echo "------------------------------------------------"
+echo " 完成！内核已更新，界面完全保留官方原始逻辑。"
+echo "------------------------------------------------"
