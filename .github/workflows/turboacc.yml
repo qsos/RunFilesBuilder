@@ -1,4 +1,4 @@
-name: turboacc
+name: turboacc-final-build
 
 on:
   workflow_dispatch:
@@ -10,29 +10,34 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      - name: Setup Packaging Environment
+      - name: Install Makeself
         run: |
           sudo apt-get update
           sudo apt-get install -y makeself
 
-      - name: Execute Shell Script
+      - name: Prepare Files
         run: |
           chmod +x shell/turboacc.sh
           ./shell/turboacc.sh
+          # 使用 info 里的说明作为控制文件
           cp info/turboacc.md control
 
-      - name: Generate Run File
+      - name: Create .run Package
         run: |
           mkdir -p output
-          # 【关键点】这里固定输出文件名为 TurboAcc-x86_64.run
-          makeself --nox11 . output/TurboAcc-x86_64.run "TurboAcc for iStoreOS" ./install.sh
+          # 制作自解压包，固定文件名
+          makeself --nox11 . output/TurboAcc_For_iStoreOS_x86.run "TurboAcc_Network_Accelerator" ./install.sh
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: plugin-release  # 固定 Tag 名字
-          name: TurboAcc 最新插件包
-          files: output/TurboAcc-x86_64.run
-          overwrite: true           # 开启覆盖模式，这样 Release 里永远只有一个文件
+          tag_name: final
+          name: TurboAcc 终极修复版
+          body: |
+            这是最后一次尝试的构建包。
+            包含：LuCI 界面、修改版 Firewall4、FullCone 内核补丁。
+            适配：iStoreOS x86_64
+          files: output/TurboAcc_For_iStoreOS_x86.run
+          overwrite: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
