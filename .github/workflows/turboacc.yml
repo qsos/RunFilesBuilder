@@ -19,19 +19,20 @@ jobs:
         run: |
           chmod +x shell/turboacc.sh
           ./shell/turboacc.sh
-          # 将元数据复制给 control 文件
           cp info/turboacc.md control
 
       - name: Generate Run File
         run: |
           mkdir -p output
-          # 打包成 .run 文件
-          makeself --nox11 . output/luci-app-turboacc_x86_64.run "TurboAcc for iStoreOS" ./install.sh
+          # 【关键点】这里固定输出文件名为 TurboAcc-x86_64.run
+          makeself --nox11 . output/TurboAcc-x86_64.run "TurboAcc for iStoreOS" ./install.sh
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: Latest
-          files: output/luci-app-turboacc_x86_64.run
+          tag_name: plugin-release  # 固定 Tag 名字
+          name: TurboAcc 最新插件包
+          files: output/TurboAcc-x86_64.run
+          overwrite: true           # 开启覆盖模式，这样 Release 里永远只有一个文件
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
