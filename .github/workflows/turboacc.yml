@@ -2,10 +2,6 @@ name: turboacc
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - 'shell/turboacc.sh'
-      - '.github/workflows/turboacc.yml'
 
 jobs:
   build:
@@ -14,31 +10,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      - name: Preparation
+      - name: Setup Packaging Environment
         run: |
           sudo apt-get update
-          sudo apt-get install makeself
-          chmod +x shell/turboacc.sh
+          sudo apt-get install -y makeself
 
-      - name: Build TurboAcc Run File
+      - name: Execute Shell Script
         run: |
-          # 执行刚才写的 shell 脚本来准备文件
+          chmod +x shell/turboacc.sh
           ./shell/turboacc.sh
-          
-          # 读取 control 信息
-          # 这个项目通常会把 info/*.md 转换成控制信息
+          # 将元数据复制给 control 文件
           cp info/turboacc.md control
-          
-          # 使用 makeself 打包
-          # 格式: makeself [目录] [文件名] [标题] [启动脚本]
+
+      - name: Generate Run File
+        run: |
           mkdir -p output
-          makeself --nox11 . output/turboacc_x86_64.run "TurboAcc for iStoreOS" ./install.sh
+          # 打包成 .run 文件
+          makeself --nox11 . output/luci-app-turboacc_x86_64.run "TurboAcc for iStoreOS" ./install.sh
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v1
-        if: github.event_name != 'pull_request'
         with:
-          tag_name: turboacc
-          files: output/turboacc_x86_64.run
+          tag_name: Latest
+          files: output/luci-app-turboacc_x86_64.run
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
