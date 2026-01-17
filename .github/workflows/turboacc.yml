@@ -1,0 +1,44 @@
+name: turboacc
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'shell/turboacc.sh'
+      - '.github/workflows/turboacc.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Preparation
+        run: |
+          sudo apt-get update
+          sudo apt-get install makeself
+          chmod +x shell/turboacc.sh
+
+      - name: Build TurboAcc Run File
+        run: |
+          # 执行刚才写的 shell 脚本来准备文件
+          ./shell/turboacc.sh
+          
+          # 读取 control 信息
+          # 这个项目通常会把 info/*.md 转换成控制信息
+          cp info/turboacc.md control
+          
+          # 使用 makeself 打包
+          # 格式: makeself [目录] [文件名] [标题] [启动脚本]
+          mkdir -p output
+          makeself --nox11 . output/turboacc_x86_64.run "TurboAcc for iStoreOS" ./install.sh
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v1
+        if: github.event_name != 'pull_request'
+        with:
+          tag_name: turboacc
+          files: output/turboacc_x86_64.run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
