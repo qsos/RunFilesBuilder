@@ -3,7 +3,7 @@ name: Make Passwall run files
 on:
   schedule:
     - cron: '0 */12 * * *'
-  workflow_dispatch:
+  workflow_dispatch: # 只要这一行缩进正确，按钮就会回来
 
 jobs:
   build:
@@ -20,48 +20,45 @@ jobs:
         run: |
           echo "RELEASE_TAG=$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
 
-      - name: Create One-Click Installer Script
+      - name: Create Installer Script
         run: |
           mkdir -p output
+          # 写入你提供的最新官方安装逻辑
           cat <<'EOF' > output/install.sh
 #!/bin/sh
-echo "--- Passwall 一键配置/安装脚本 ---"
+echo "--- 开始 Passwall 官方源安装流程 ---"
 
-# 1. 添加 OPKG Key
-echo "Adding OPKG Key..."
+# 1. 下载并添加 Key
 wget -O passwall.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/passwall.pub
 opkg-key add passwall.pub
 rm passwall.pub
 
-# 2. 添加软件源 (Repository)
-echo "Adding Passwall Feeds..."
+# 2. 自动识别架构并添加软件源
 read release arch << EOM
 $(. /etc/openwrt_release ; echo ${DISTRIB_RELEASE%.*} $DISTRIB_ARCH)
 EOM
 
-# 清理旧的自定义源避免重复
+# 清除旧的同名源，防止冲突
 sed -i '/passwall/d' /etc/opkg/customfeeds.conf
 
 for feed in passwall_luci passwall_packages passwall2; do
   echo "src/gz $feed https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-$release/$arch/$feed" >> /etc/opkg/customfeeds.conf
 done
 
-# 3. 执行安装
-echo "Updating opkg and installing Passwall..."
+# 3. 安装软件
 opkg update
-opkg install luci-app-passwall luci-i18n-passwall-zh-cn
-opkg install luci-app-passwall2 luci-i18n-passwall2-zh-cn
+opkg install luci-app-passwall luci-app-passwall2 luci-i18n-passwall-zh-cn luci-i18n-passwall2-zh-cn
 
-# 4. 重启 Web 服务
+# 4. 重启服务
 /etc/init.d/uhttpd restart
-echo "Installation complete!"
+echo "安装完成！"
 EOF
           chmod +x output/install.sh
 
-      - name: Build Self-Extracting Package
+      - name: Package with Makeself
         run: |
           git clone --depth 1 https://github.com/megastep/makeself.git
-          ./makeself/makeself.sh output/ passwall_oneclick_installer.run "Passwall Installer" ./install.sh
+          ./makeself/makeself.sh output/ passwall_installer.run "Passwall Installer" ./install.sh
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -69,13 +66,9 @@ EOF
           tag_name: ${{ env.RELEASE_TAG }}
           name: "PassWall-OneClick-${{ env.RELEASE_TAG }}"
           body: |
-            ### 最新一键安装包 (官方推荐源模式)
-            此文件由 Github Action 自动生成。
-            
-            **使用方法：**
-            1. 将 `passwall_oneclick_installer.run` 上传至 OpenWrt。
-            2. 运行 `sh passwall_oneclick_installer.run`。
-            3. 脚本将自动完成：添加密钥 -> 配置软件源 -> 安装插件及中文包。
+            ### Passwall 一键安装包 (官方源模式)
+            此包会自动配置软件源并安装 Passwall 1 & 2。
+            **用法：** 下载后执行 `sh passwall_installer.run` 即可。
           files: "*.run"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
