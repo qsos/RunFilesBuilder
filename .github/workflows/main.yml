@@ -1,10 +1,7 @@
-name: Build PassWall RUN
+name: Build PassWall RUN (DEBUG)
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 jobs:
   build:
@@ -14,28 +11,48 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Show workspace
+        run: |
+          echo "=== WORKSPACE ==="
+          pwd
+          ls -lah
+
       - name: Prepare files
         run: |
           mkdir -p x86_64/files
           cp shell/ps_install.sh x86_64/files/
           chmod +x x86_64/files/ps_install.sh
 
+          echo "=== x86_64/files ==="
+          ls -lah x86_64/files
+
       - name: Install makeself
         run: |
           sudo apt update
           sudo apt install -y makeself
+          which makeself
+          makeself --version
 
       - name: Build passwall.run
         run: |
+          echo "=== BEFORE BUILD ==="
+          pwd
+          find . -maxdepth 3 -type f
+
           mkdir -p output
+
           makeself \
             x86_64/files \
             output/passwall.run \
             "PassWall Installer" \
-            ./ps_install.sh
+            ps_install.sh
 
-      - name: Upload artifact
+          echo "=== AFTER BUILD ==="
+          find . -maxdepth 4 -type f
+
+      - name: Upload artifact (force)
         uses: actions/upload-artifact@v4
         with:
           name: passwall-run
-          path: output/passwall.run
+          path: |
+            **/*.run
