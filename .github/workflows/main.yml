@@ -1,9 +1,12 @@
-name: Build Passwall for iStoreOS (Fixed)
+name: Build Passwall for iStoreOS (Final)
 
 on:
   schedule:
-    - cron: '0 18 * * 5'
-  workflow_dispatch:
+    - cron: '0 18 * * 5'  # 每周五北京时间凌晨2点运行
+  workflow_dispatch:      # 允许手动点击运行
+
+permissions:
+  contents: write
 
 jobs:
   download_and_package:
@@ -12,9 +15,11 @@ jobs:
     strategy:
       matrix:
         include:
+          # x86_64 (常见软路由)
           - arch: x86_64
             base_url: https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-23.05/x86_64
             
+          # ARMv8 (R2S, R4S, RK3568 等)
           - arch: aarch64_cortex-a53
             base_url: https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-23.05/aarch64_cortex-a53
 
@@ -27,10 +32,9 @@ jobs:
         with:
           python-version: '3.x'
 
-      # --- 关键修复：添加这一步来安装 requests 库 ---
+      # 1. 修复报错：安装 requests 库
       - name: Install Python dependencies
         run: pip install requests
-      # -------------------------------------------
 
       - name: Clone makeself
         run: git clone https://github.com/megastep/makeself.git
@@ -42,7 +46,7 @@ jobs:
         run: |
           mkdir -p passwall_${ARCH}/packages
           
-          # 这是一个 Python 脚本，用于从 SourceForge 抓取所有 IPK
+          # Python 脚本：自动解析源并下载所有 IPK
           cat <<EOF > downloader.py
           import requests
           import os
@@ -53,8 +57,6 @@ jobs:
           target_dir = f"passwall_{os.environ['ARCH']}/packages"
 
           print(f"Start downloading from {base_url}...")
-
-          # 设置 User-Agent 防止被 SourceForge 拦截
           headers = {'User-Agent': 'Mozilla/5.0'}
 
           for sub in sub_dirs:
@@ -64,12 +66,12 @@ jobs:
                   r = requests.get(index_url, headers=headers, timeout=30)
                   r.raise_for_status()
                   
-                  content = gzip.decompress(r.content).decode('utf-8')
+                  # 解压索引
+                  content = gzip.decompress(r.content).decode('utf-8', errors='ignore')
                   
                   for line in content.split('\n'):
                       if line.startswith('Filename:'):
                           filename = line.split(': ')[1].strip()
-                          # 构造完整下载地址
                           file_url = f"{base_url}/{sub}/{filename}"
                           local_path = os.path.join(target_dir, filename)
                           
@@ -82,12 +84,12 @@ jobs:
                                           for chunk in fr.iter_content(chunk_size=8192):
                                               f.write(chunk)
                                   else:
-                                      print(f"Failed to download {filename}: Status {fr.status_code}")
+                                      print(f"Failed: {fr.status_code}")
                               except Exception as e:
-                                  print(f"Error downloading {filename}: {e}")
+                                  print(f"Error: {e}")
 
               except Exception as e:
-                  print(f"Failed to fetch index for {sub}: {e}")
+                  print(f"Index fetch failed: {e}")
 
           print("Download finished.")
           EOF
@@ -98,6 +100,7 @@ jobs:
         run: |
           cd passwall_${{ matrix.arch }}
           
+          # 针对 iStoreOS 优化的安装脚本
           cat <<EOF > install.sh
           #!/bin/sh
           echo "Installing Passwall for iStoreOS..."
@@ -110,10 +113,12 @@ jobs:
           fi
 
           echo "Installing IPKs..."
+          # 关键参数：--force-depends 解决 iStoreOS 内核版本差异问题
           opkg install *.ipk --force-depends --force-overwrite
           
           if [ \$? -eq 0 ]; then
               echo "Success! Please refresh your web interface."
+              rm -rf /tmp/passwall_install
           else
               echo "Installation finished with warnings (normal for iStoreOS)."
           fi
@@ -145,12 +150,31 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true 
-          
+      
+      # 2. 修复报错：先计算变量，再使用
+      - name: Generate Tag & Date
+        run: |
+          echo "RELEASE_TAG=iStoreOS-Build-$(date +'%Y.%m.%d')" >> $GITHUB_ENV
+          echo "RELEASE_DATE=$(date +'%Y.%m.%d')" >> $GITHUB_ENV
+
       - name: 发布 Release
         uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: "iStoreOS-Build-$(date +'%Y.%m.%d')"
-          name: "Passwall for iStoreOS (ybfl源) $(date +'%Y.%m.%d')"
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "Passwall for iStoreOS (ybfl源) ${{ env.RELEASE_DATE }}"
+          body: |
+            Passwall 离线安装包 - 专为 iStoreOS 优化
+            
+            **包含架构：**
+            - `x86_64`: 适用于常见的英特尔/AMD 软路由。
+            - `aarch64`: 适用于 R2S, R4S, R68s, RK3568 等 ARM 设备。
+            
+            **安装说明：**
+            1. 下载对应的 `.run` 文件。
+            2. 上传到路由器 `/tmp` 目录。
+            3. 执行命令：`chmod +x 文件名.run && ./文件名.run`
+            
+            *数据来源: sourceforge.net/projects/openwrt-passwall-build*
           files: artifacts/*.run
