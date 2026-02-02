@@ -16,15 +16,21 @@ jobs:
 
       - name: Show repo tree (debug)
         run: |
-          echo "==== YOUR REPO ===="
+          echo "===== YOUR REPO TREE ====="
           ls -R .
-          echo "=================="
+          echo "=========================="
 
       - name: Clone RunFilesBuilder
         run: |
           git clone https://github.com/wukongdaily/RunFilesBuilder.git
 
-      - name: Copy PassWall install script into builder
+      - name: Show RunFilesBuilder tree (debug)
+        run: |
+          echo "===== RunFilesBuilder TREE ====="
+          ls -R RunFilesBuilder | head -n 200
+          echo "================================"
+
+      - name: Copy PassWall install script
         run: |
           mkdir -p RunFilesBuilder/x86_64/files
           cp shell/ps_install.sh RunFilesBuilder/x86_64/files/
@@ -33,7 +39,7 @@ jobs:
       - name: Build RUN
         run: |
           cd RunFilesBuilder
-          bash build.sh x86_64
+          bash scripts/build.sh x86_64
 
       - name: Upload RUN artifact
         uses: actions/upload-artifact@v4
