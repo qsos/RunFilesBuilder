@@ -1,9 +1,9 @@
-name: Build Passwall for iStoreOS (Final)
+name: Build Passwall for iStoreOS (RSS Method)
 
 on:
   schedule:
-    - cron: '0 18 * * 5'  # 每周五北京时间凌晨2点运行
-  workflow_dispatch:      # 允许手动点击运行
+    - cron: '0 18 * * 5'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -15,13 +15,15 @@ jobs:
     strategy:
       matrix:
         include:
-          # x86_64 (常见软路由)
           - arch: x86_64
-            base_url: https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-23.05/x86_64
+            # SourceForge 的 RSS Feed 地址 (x86)
+            rss_packages: https://sourceforge.net/projects/openwrt-passwall-build/rss?path=/releases/packages-23.05/x86_64/passwall_packages
+            rss_luci: https://sourceforge.net/projects/openwrt-passwall-build/rss?path=/releases/packages-23.05/x86_64/passwall_luci
             
-          # ARMv8 (R2S, R4S, RK3568 等)
           - arch: aarch64_cortex-a53
-            base_url: https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-23.05/aarch64_cortex-a53
+            # SourceForge 的 RSS Feed 地址 (ARM)
+            rss_packages: https://sourceforge.net/projects/openwrt-passwall-build/rss?path=/releases/packages-23.05/aarch64_cortex-a53/passwall_packages
+            rss_luci: https://sourceforge.net/projects/openwrt-passwall-build/rss?path=/releases/packages-23.05/aarch64_cortex-a53/passwall_luci
 
     steps:
       - name: Checkout code
@@ -32,66 +34,105 @@ jobs:
         with:
           python-version: '3.x'
 
-      # 1. 修复报错：安装 requests 库
       - name: Install Python dependencies
         run: pip install requests
 
       - name: Clone makeself
         run: git clone https://github.com/megastep/makeself.git
 
-      - name: 下载 Passwall 及所有依赖
+      - name: 下载 Passwall 及所有依赖 (RSS 强力模式)
         env:
-          BASE_URL: ${{ matrix.base_url }}
+          RSS_PACKAGES: ${{ matrix.rss_packages }}
+          RSS_LUCI: ${{ matrix.rss_luci }}
           ARCH: ${{ matrix.arch }}
         run: |
           mkdir -p passwall_${ARCH}/packages
           
-          # Python 脚本：自动解析源并下载所有 IPK
           cat <<EOF > downloader.py
           import requests
           import os
-          import gzip
-          
-          sub_dirs = ['passwall_packages', 'passwall_luci']
-          base_url = os.environ['BASE_URL']
+          import xml.etree.ElementTree as ET
+          import time
+
+          # 从环境变量获取 RSS 地址
+          rss_urls = [os.environ['RSS_PACKAGES'], os.environ['RSS_LUCI']]
           target_dir = f"passwall_{os.environ['ARCH']}/packages"
+          
+          headers = {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+          }
 
-          print(f"Start downloading from {base_url}...")
-          headers = {'User-Agent': 'Mozilla/5.0'}
+          downloaded_count = 0
+          
+          print(f"Target Directory: {target_dir}")
 
-          for sub in sub_dirs:
-              index_url = f"{base_url}/{sub}/Packages.gz"
-              print(f"Fetching index: {index_url}")
+          for rss_url in rss_urls:
+              print(f"\nFetching RSS: {rss_url}")
               try:
-                  r = requests.get(index_url, headers=headers, timeout=30)
+                  # 获取 RSS XML
+                  r = requests.get(rss_url, headers=headers, timeout=30)
                   r.raise_for_status()
                   
-                  # 解压索引
-                  content = gzip.decompress(r.content).decode('utf-8', errors='ignore')
+                  # 解析 XML 寻找 .ipk 链接
+                  root = ET.fromstring(r.content)
+                  # SourceForge RSS 的 namespace
+                  ns = {'media': 'http://search.yahoo.com/mrss/'}
                   
-                  for line in content.split('\n'):
-                      if line.startswith('Filename:'):
-                          filename = line.split(': ')[1].strip()
-                          file_url = f"{base_url}/{sub}/{filename}"
-                          local_path = os.path.join(target_dir, filename)
+                  for item in root.findall('./channel/item'):
+                      link = item.find('link').text
+                      # 尝试获取文件名
+                      title = item.find('title').text
+                      
+                      # 只有 .ipk 文件才是我们要的
+                      if title.endswith('.ipk'):
+                          print(f"Found: {title}")
                           
+                          local_path = os.path.join(target_dir, title)
+                          # 如果文件不存在，下载
                           if not os.path.exists(local_path):
-                              print(f"Downloading: {filename}")
-                              try:
-                                  fr = requests.get(file_url, headers=headers, stream=True, timeout=60)
-                                  if fr.status_code == 200:
-                                      with open(local_path, 'wb') as f:
-                                          for chunk in fr.iter_content(chunk_size=8192):
-                                              f.write(chunk)
-                                  else:
-                                      print(f"Failed: {fr.status_code}")
-                              except Exception as e:
-                                  print(f"Error: {e}")
+                              print(f"  Downloading -> {title}...")
+                              
+                              # 下载重试逻辑
+                              success = False
+                              for attempt in range(3):
+                                  try:
+                                      # SourceForge 下载链接通常会自动重定向，allow_redirects=True 是默认的
+                                      d = requests.get(link, headers=headers, stream=True, timeout=60)
+                                      if d.status_code == 200:
+                                          with open(local_path, 'wb') as f:
+                                              for chunk in d.iter_content(chunk_size=8192):
+                                                  f.write(chunk)
+                                          success = True
+                                          downloaded_count += 1
+                                          break
+                                      else:
+                                          print(f"  Status {d.status_code}, retrying...")
+                                  except Exception as e:
+                                      print(f"  Error: {e}, retrying...")
+                                  time.sleep(2)
+                              
+                              if not success:
+                                  print("  !!! Failed to download item !!!")
 
               except Exception as e:
-                  print(f"Index fetch failed: {e}")
+                  print(f"RSS Parsing Error: {e}")
 
-          print("Download finished.")
+          # --- 关键检查：如果没有下载到文件，强制报错，不要生成空包 ---
+          print(f"\nTotal files downloaded: {downloaded_count}")
+          
+          # 列出当前文件夹大小
+          total_size = 0
+          for f in os.listdir(target_dir):
+              fp = os.path.join(target_dir, f)
+              total_size += os.path.getsize(fp)
+          
+          print(f"Total directory size: {total_size / 1024 / 1024:.2f} MB")
+
+          if total_size < 1024 * 1024: # 如果总大小小于 1MB，肯定出问题了
+              print("Error: Files are too small or empty. Aborting build!")
+              exit(1)
+          
+          print("Check passed. Proceeding to packaging.")
           EOF
           
           python3 downloader.py
@@ -100,27 +141,31 @@ jobs:
         run: |
           cd passwall_${{ matrix.arch }}
           
-          # 针对 iStoreOS 优化的安装脚本
           cat <<EOF > install.sh
           #!/bin/sh
-          echo "Installing Passwall for iStoreOS..."
+          echo "========================================"
+          echo "Passwall Installer for iStoreOS"
+          echo "========================================"
           
           if [ -d "./packages" ]; then
               cd packages
           else
-              echo "Package directory not found!"
+              echo "Error: ./packages directory missing!"
               exit 1
           fi
 
-          echo "Installing IPKs..."
-          # 关键参数：--force-depends 解决 iStoreOS 内核版本差异问题
+          echo "Installing packages..."
+          # iStoreOS 必须加 --force-depends
           opkg install *.ipk --force-depends --force-overwrite
           
           if [ \$? -eq 0 ]; then
-              echo "Success! Please refresh your web interface."
+              echo "----------------------------------------"
+              echo "SUCCESS! Passwall installed."
+              echo "Please refresh your browser."
+              echo "----------------------------------------"
               rm -rf /tmp/passwall_install
           else
-              echo "Installation finished with warnings (normal for iStoreOS)."
+              echo "Completed with warnings (Expected on iStoreOS)."
           fi
           EOF
           
@@ -129,8 +174,11 @@ jobs:
       - name: 制作 .run 文件
         run: |
           cd makeself
-          OUT_NAME="Passwall_iStoreOS_${{ matrix.arch }}_$(date +'%Y%m%d').run"
-          ./makeself.sh ../passwall_${{ matrix.arch }}/ $OUT_NAME "Passwall for iStoreOS" ./install.sh
+          
+          DATE_TAG=$(date +'%Y%m%d')
+          OUT_NAME="Passwall_iStoreOS_${{ matrix.arch }}_${DATE_TAG}.run"
+          
+          ./makeself.sh ../passwall_${{ matrix.arch }}/ $OUT_NAME "Passwall iStoreOS Installer" ./install.sh
           
           mkdir -p ../output
           mv $OUT_NAME ../output/
@@ -151,10 +199,9 @@ jobs:
           path: artifacts
           merge-multiple: true 
       
-      # 2. 修复报错：先计算变量，再使用
-      - name: Generate Tag & Date
+      - name: Generate Vars
         run: |
-          echo "RELEASE_TAG=iStoreOS-Build-$(date +'%Y.%m.%d')" >> $GITHUB_ENV
+          echo "RELEASE_TAG=iStoreOS-RSS-$(date +'%Y.%m.%d')" >> $GITHUB_ENV
           echo "RELEASE_DATE=$(date +'%Y.%m.%d')" >> $GITHUB_ENV
 
       - name: 发布 Release
@@ -163,18 +210,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: "Passwall for iStoreOS (ybfl源) ${{ env.RELEASE_DATE }}"
+          name: "Passwall iStoreOS (RSS Fixed) ${{ env.RELEASE_DATE }}"
           body: |
-            Passwall 离线安装包 - 专为 iStoreOS 优化
+            Passwall 离线安装包 (修复 20KB 问题版)
             
             **包含架构：**
-            - `x86_64`: 适用于常见的英特尔/AMD 软路由。
-            - `aarch64`: 适用于 R2S, R4S, R68s, RK3568 等 ARM 设备。
+            - `x86_64` (Intel/AMD)
+            - `aarch64` (ARMv8/R2S/R4S)
             
-            **安装说明：**
-            1. 下载对应的 `.run` 文件。
-            2. 上传到路由器 `/tmp` 目录。
-            3. 执行命令：`chmod +x 文件名.run && ./文件名.run`
-            
-            *数据来源: sourceforge.net/projects/openwrt-passwall-build*
+            **安装：**
+            上传 `.run` 文件到路由器，运行 `chmod +x *.run && ./文件名.run`
           files: artifacts/*.run
