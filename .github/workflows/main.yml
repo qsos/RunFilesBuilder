@@ -1,127 +1,187 @@
-#=================================================
-# https://github.com/wukongdaily/RunFilesBuilder
-# Description: Build RunFiles using GitHub Actions
-# Lisence: MIT
-# Author: wukongdaily
-# Blog: wkdaily.cpolar.cn
-#=================================================
-
-name: Make Passwall run files
+name: Build Passwall .run Installer
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '0 18 * * 5' # 每周五运行一次，或者自行修改
   workflow_dispatch:
 
 jobs:
-  build:
+  # 任务1: 编译 IPK (使用矩阵同时编译 x86 和 arm)
+  compile:
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64
+            sdk_url: https://downloads.openwrt.org/releases/23.05.2/targets/x86/64/openwrt-sdk-23.05.2-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.xz
+          - target: aarch64
+            # 使用 Generic ARMv8 SDK (兼容大多数 Cortex-A53/A72 路由，如 N1, 玩客云, MT798x等)
+            sdk_url: https://downloads.openwrt.org/releases/23.05.2/targets/armsr/armv8/openwrt-sdk-23.05.2-armsr-armv8_gcc-12.3.0_musl.Linux-aarch64.tar.xz
 
+    steps:
+      - name: 准备编译环境
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses5-dev libncursesw5-dev \
+          zlib1g-dev gawk git gettext libssl-dev xsltproc rsync wget unzip python3 qemu-utils
+
+      - name: 下载并解压 SDK (${{ matrix.target }})
+        run: |
+          wget -O sdk.tar.xz ${{ matrix.sdk_url }}
+          mkdir sdk
+          tar -xJf sdk.tar.xz -C sdk --strip-components=1
+
+      - name: 更新 Feeds 并添加 Passwall 源
+        working-directory: sdk
+        run: |
+          # 1. 添加 Passwall 核心依赖 (Packages)
+          echo "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages" >> feeds.conf.default
+          # 2. 添加 Passwall 界面 (LuCI)
+          echo "src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall" >> feeds.conf.default
+          
+          # 更新并安装
+          ./scripts/feeds update -a
+          
+          # 这一步很关键：先卸载冲突的包（如果 SDK 自带了同名包），再安装 passwall 的包
+          ./scripts/feeds uninstall luci-app-passwall || true
+          ./scripts/feeds install -a -p passwall_packages
+          ./scripts/feeds install -a -p passwall_luci
+
+      - name: 生成编译配置
+        working-directory: sdk
+        run: |
+          # 强制选中 Passwall 及其组件
+          echo "CONFIG_PACKAGE_luci-app-passwall=m" > .config
+          echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=m" >> .config
+          
+          # 选中核心组件 (Xray, Singbox 等)
+          # 通过 make defconfig 自动计算依赖，通常会自动选中 xray-core 等
+          make defconfig
+
+      - name: 开始编译 (${{ matrix.target }})
+        working-directory: sdk
+        run: |
+          # 使用多核编译
+          make package/luci-app-passwall/compile V=s -j$(nproc)
+
+      - name: 整理编译好的 IPK
+        working-directory: sdk
+        run: |
+          mkdir -p output/main
+          mkdir -p output/depends
+          
+          # 查找生成的包
+          # 逻辑：luci-app-passwall 和 语言包 放入 main
+          find bin/packages -name "luci-app-passwall*.ipk" -exec cp {} output/main/ \;
+          find bin/packages -name "luci-i18n-passwall*.ipk" -exec cp {} output/main/ \;
+          
+          # 逻辑：其他的 passwall 依赖包 (xray, sing-box, chinadns 等) 放入 depends
+          # 注意：这里会把所有 passwall_packages 源里的东西都拷出来
+          # 我们通过查找 passwall_packages 目录下的 ipk
+          find bin/packages -path "*passwall_packages*" -name "*.ipk" -exec cp {} output/depends/ \;
+          
+          # 确保 main 里的不要在 depends 里重复 (虽然上面路径应该已经区分开了，保险起见)
+          rm -f output/depends/luci-app-passwall*.ipk
+
+      - name: 上传编译产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipks-${{ matrix.target }}
+          path: sdk/output/
+
+  # 任务2: 打包生成 .run 文件并发布
+  package_release:
+    needs: compile
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-      
-      - name: Fetch latest release tag from Passwall
-        id: fetch_latest_tag
-        run: |
-          latest_tag=$(curl -s https://api.github.com/repos/Openwrt-Passwall/openwrt-passwall/releases/latest | jq -r '.tag_name')
-          echo "LATEST_TAG=$latest_tag" >> $GITHUB_ENV
 
-      - name: Clone makeself repository
+      - name: Clone makeself
         run: git clone https://github.com/megastep/makeself.git
 
-      - name: Download latest Passwall files
+      - name: 获取最新版本号 (用于命名)
+        id: tag
         run: |
-          mkdir -p downloads
-          cd downloads
-          curl -LO $(curl -s https://api.github.com/repos/Openwrt-Passwall/openwrt-passwall/releases/latest | grep -oP '"browser_download_url":\s*".*passwall_packages_ipk_x86_64.zip"' | cut -d '"' -f 4)
-          curl -LO $(curl -s https://api.github.com/repos/Openwrt-Passwall/openwrt-passwall/releases/latest | grep -oP '"browser_download_url":\s*".*passwall_packages_ipk_aarch64_cortex-a53.zip"' | cut -d '"' -f 4)
-          curl -LO $(curl -s https://api.github.com/repos/Openwrt-Passwall/openwrt-passwall/releases/latest | grep -oP '"browser_download_url":\s*".*luci-.*-passwall.*\.ipk"' | head -1 | cut -d '"' -f 4)
-          curl -LO $(curl -s https://api.github.com/repos/Openwrt-Passwall/openwrt-passwall/releases/latest | grep -oP '"browser_download_url":\s*".*luci-.*-passwall.*\.ipk"' | tail -1 | cut -d '"' -f 4)
+          # 因为官方 Release 只有源码，我们获取最新的 Tag 名称
+          latest_tag=$(curl -s https://api.github.com/repos/Openwrt-Passwall/openwrt-passwall/tags | jq -r '.[0].name')
+          echo "LATEST_TAG=$latest_tag" >> $GITHUB_ENV
+          echo "Using version: $latest_tag"
 
-      - name: Organize files for x86_64
-        run: |
-          mkdir -p passwall_x86_64/depends passwall_x86_64/main
-          unzip downloads/passwall_packages_ipk_x86_64.zip -d passwall_x86_64/depends
-          rm downloads/passwall_packages_ipk_x86_64.zip
-          cp downloads/luci-*.ipk passwall_x86_64/main/
+      - name: 下载 x86_64 编译产物
+        uses: actions/download-artifact@v4
+        with:
+          name: ipks-x86_64
+          path: passwall_x86_64
 
-      - name: Organize files for aarch64_cortex-a53
-        run: |
-          mkdir -p passwall_aarch64/depends passwall_aarch64/main
-          unzip downloads/passwall_packages_ipk_aarch64_cortex-a53.zip -d passwall_aarch64/depends
-          rm downloads/passwall_packages_ipk_aarch64_cortex-a53.zip
-          cp downloads/luci-*.ipk passwall_aarch64/main/
+      - name: 下载 aarch64 编译产物
+        uses: actions/download-artifact@v4
+        with:
+          name: ipks-aarch64
+          path: passwall_aarch64
 
-      - name: Create install.sh scripts
+      - name: 创建安装脚本 (install.sh)
         run: |
+          # 只需要创建一个，然后复制
           cat <<EOF > passwall_x86_64/install.sh
           #!/bin/sh
+          echo "Installing Passwall dependencies..."
           opkg update
-          if [ $? -ne 0 ]; then
-              echo "update failed。"
-              exit 1
-          fi
-          opkg install iptables-mod-tproxy
-          opkg install iptables-mod-socket
-          opkg install iptables-mod-iprange
-          opkg install iptables-mod-conntrack-extra
-          opkg install depends/*.ipk
-          opkg install main/*.ipk
+          
+          # 安装系统基础依赖 (如果源里有)
+          opkg install iptables-mod-tproxy iptables-mod-socket iptables-mod-iprange iptables-mod-conntrack-extra unzip
+          
+          echo "Installing Core Components..."
+          # 强制安装 depends 目录下的所有 ipk
+          opkg install depends/*.ipk --force-depends
+          
+          echo "Installing LuCI App..."
+          opkg install main/*.ipk --force-depends
+          
+          echo "Done! Please refresh your LuCI page."
+          rm -rf /tmp/passwall_install
           EOF
+          
           chmod +x passwall_x86_64/install.sh
+          
+          # 复制到 aarch64 目录
           cp passwall_x86_64/install.sh passwall_aarch64/install.sh
 
-      - name: Move passwall directories to makeself
+      - name: 移动目录到 makeself 准备打包
         run: |
           mv passwall_x86_64 makeself/
           mv passwall_aarch64 makeself/
 
-      - name: Create self-extracting packages
+      - name: 生成 .run 文件
         run: |
           cd makeself
-          ./makeself.sh passwall_x86_64/ passwall_x86_64_${{ env.LATEST_TAG }}.run "by github action" ./install.sh
-          ./makeself.sh passwall_aarch64/ passwall_aarch64_a53_${{ env.LATEST_TAG }}.run "by github action" ./install.sh
+          # 打包 x86_64
+          ./makeself.sh passwall_x86_64/ passwall_x86_64_${{ env.LATEST_TAG }}.run "Passwall Installer x86" ./install.sh
+          
+          # 打包 aarch64
+          ./makeself.sh passwall_aarch64/ passwall_aarch64_${{ env.LATEST_TAG }}.run "Passwall Installer ARM64" ./install.sh
 
-      - name: Check file sizes
+      - name: 生成 Release 说明
         run: |
-          ls -lh makeself/passwall_*.run
+          echo "## Passwall Auto Build ${{ env.LATEST_TAG }}" > release_notes.md
+          echo "Build Date: $(date)" >> release_notes.md
+          echo "Based on official Openwrt-Passwall source." >> release_notes.md
+          echo "" >> release_notes.md
+          echo "### Supported Architectures:" >> release_notes.md
+          echo "- **x86_64**: For Intel/AMD Soft Routers" >> release_notes.md
+          echo "- **aarch64**: Generic ARMv8 (Compatible with R2S, R4S, N1, AX6000, etc.)" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "### Installation:" >> release_notes.md
+          echo "Upload the .run file to router, chmod +x, and run it." >> release_notes.md
 
-      - name: Preparing release name
-        run: |
-          release_name=$(TZ="Asia/Shanghai" date +'%Y-%m-%d %H:%M Build')
-          echo "RELEASE_NAME=$release_name" >> $GITHUB_ENV
-
-      - name: Fetch latest release details
-        id: fetch_release_details
-        run: |
-          extra_content="![Github](https://img.shields.io/badge/Passwall.run-123456?logo=github&logoColor=fff&labelColor=green&style=for-the-badge) [![Github](https://img.shields.io/badge/国内加速站下载-FC7C0D?logo=github&logoColor=fff&labelColor=000&style=for-the-badge)](https://wkdaily.cpolar.cn/archives/1) ![GitHub Downloads (all assets, specific tag)](https://img.shields.io/github/downloads/wukongdaily/RunFilesBuilder/${{ env.LATEST_TAG }}/total?style=for-the-badge&labelColor=black&color=%2325c2a0)"
-          release_notes=$(curl -s https://api.github.com/repos/xiaorouji/openwrt-passwall/releases/latest | jq -r '.body')
-          if [ -z "$release_notes" ]; then
-            release_notes="No release notes available."
-          fi
-          echo -e "$extra_content\n\n$release_notes" > release_notes.md
-
-      - name: Print release notes
-        run: |
-          cat release_notes.md
-
-      - name: Generate new tag & release
-        uses: softprops/action-gh-release@master
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ env.LATEST_TAG }}
-          target_commitish: ${{ github.ref_name }}
-          prerelease: false
+          name: "PassWall ${{ env.LATEST_TAG }} (Self-contained)"
           body_path: release_notes.md
-
-      - name: Upload run files as release assets
-        uses: softprops/action-gh-release@v2.1.0
-        with:
-          tag_name: ${{ env.LATEST_TAG }}
-          name: "PassWall-${{ env.LATEST_TAG }}"
-          files: makeself/passwall_*.run
-          token: ${{ secrets.GITHUB_TOKEN }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          files: makeself/*.run
+          prerelease: false
