@@ -11,55 +11,31 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Clone RunFilesBuilder
+      - name: Prepare files
         run: |
-          git clone https://github.com/wukongdaily/RunFilesBuilder.git
+          mkdir -p x86_64/files
+          cp shell/ps_install.sh x86_64/files/
+          chmod +x x86_64/files/ps_install.sh
 
-      - name: Prepare RUN structure
+      - name: Install makeself
         run: |
-          mkdir -p RunFilesBuilder/x86_64/files
+          sudo apt update
+          sudo apt install -y makeself
 
-          # 写入 ps_install.sh（不依赖你仓库原文件）
-          cat > RunFilesBuilder/x86_64/files/ps_install.sh << 'EOF'
-          #!/bin/sh
-
-          echo "=== PassWall Install Script ==="
-
-          # 添加 key
-          wget -O /tmp/passwall.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/passwall.pub
-          opkg-key add /tmp/passwall.pub
-
-          # 读取系统信息
-          . /etc/openwrt_release
-          release=${DISTRIB_RELEASE%.*}
-          arch=$DISTRIB_ARCH
-
-          # 写入 feed
-          cat >> /etc/opkg/customfeeds.conf << FEED
-          src/gz passwall_luci https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-$release/$arch/passwall_luci
-          src/gz passwall_packages https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-$release/$arch/passwall_packages
-          FEED
-
-          opkg update
-          opkg install luci-app-passwall luci-i18n-passwall-zh-cn
-
-          /etc/init.d/uhttpd restart
-
-          echo "=== PassWall Install Finished ==="
-          EOF
-
-          chmod +x RunFilesBuilder/x86_64/files/ps_install.sh
-
-      - name: Build RUN file
+      - name: Build passwall.run
         run: |
-          cd RunFilesBuilder
-          bash RunFilesBuilder.sh x86_64
+          mkdir -p output
+          makeself \
+            x86_64/files \
+            output/passwall.run \
+            "PassWall Installer" \
+            ./ps_install.sh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: passwall-run
-          path: RunFilesBuilder/output/*.run
+          path: output/passwall.run
