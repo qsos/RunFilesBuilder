@@ -11,23 +11,23 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout repository
+      - name: Checkout your repo
         uses: actions/checkout@v4
 
-      - name: Ensure ps_install.sh exists
+      - name: Show repo tree (debug)
         run: |
-          echo "==== DEBUG TREE ===="
+          echo "==== YOUR REPO ===="
           ls -R .
-          echo "===================="
-          if [ ! -f RunFilesBuilder/shell/ps_install.sh ]; then
-            echo "ERROR: RunFilesBuilder/shell/ps_install.sh NOT FOUND"
-            exit 1
-          fi
+          echo "=================="
 
-      - name: Prepare RunFilesBuilder files
+      - name: Clone RunFilesBuilder
+        run: |
+          git clone https://github.com/wukongdaily/RunFilesBuilder.git
+
+      - name: Copy PassWall install script into builder
         run: |
           mkdir -p RunFilesBuilder/x86_64/files
-          cp RunFilesBuilder/shell/ps_install.sh RunFilesBuilder/x86_64/files/
+          cp shell/ps_install.sh RunFilesBuilder/x86_64/files/
           chmod +x RunFilesBuilder/x86_64/files/ps_install.sh
 
       - name: Build RUN
