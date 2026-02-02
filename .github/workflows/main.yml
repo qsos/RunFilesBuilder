@@ -1,9 +1,9 @@
-name: Build Passwall for iStoreOS
+name: Build Passwall for iStoreOS (Fixed)
 
 on:
   schedule:
-    - cron: '0 18 * * 5' # 每周五定时运行
-  workflow_dispatch:     # 允许手动运行
+    - cron: '0 18 * * 5'
+  workflow_dispatch:
 
 jobs:
   download_and_package:
@@ -12,12 +12,9 @@ jobs:
     strategy:
       matrix:
         include:
-          # iStoreOS x86 版本 (大多数软路由)
           - arch: x86_64
-            # 使用 23.05 的包，因为 Passwall 需要较新的组件，iStoreOS 兼容性一般没问题
             base_url: https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-23.05/x86_64
             
-          # iStoreOS ARM 版本 (如 R2S, R4S, RK35xx 等)
           - arch: aarch64_cortex-a53
             base_url: https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-23.05/aarch64_cortex-a53
 
@@ -30,116 +27,96 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Clone makeself (打包工具)
+      # --- 关键修复：添加这一步来安装 requests 库 ---
+      - name: Install Python dependencies
+        run: pip install requests
+      # -------------------------------------------
+
+      - name: Clone makeself
         run: git clone https://github.com/megastep/makeself.git
 
-      - name: 下载 Passwall 及所有依赖 (Python脚本)
+      - name: 下载 Passwall 及所有依赖
         env:
           BASE_URL: ${{ matrix.base_url }}
           ARCH: ${{ matrix.arch }}
         run: |
-          # 创建下载目录
           mkdir -p passwall_${ARCH}/packages
           
-          # 使用 Python 脚本智能解析 SourceForge 的 Packages 文件并下载
+          # 这是一个 Python 脚本，用于从 SourceForge 抓取所有 IPK
           cat <<EOF > downloader.py
           import requests
           import os
           import gzip
-          import io
-
-          # 两个主要的文件夹：核心依赖 和 LuCI界面
+          
           sub_dirs = ['passwall_packages', 'passwall_luci']
           base_url = os.environ['BASE_URL']
           target_dir = f"passwall_{os.environ['ARCH']}/packages"
 
-          print(f"开始从 {base_url} 下载...")
+          print(f"Start downloading from {base_url}...")
+
+          # 设置 User-Agent 防止被 SourceForge 拦截
+          headers = {'User-Agent': 'Mozilla/5.0'}
 
           for sub in sub_dirs:
-              # 1. 下载索引文件 Packages.gz
               index_url = f"{base_url}/{sub}/Packages.gz"
-              print(f"正在读取索引: {index_url}")
+              print(f"Fetching index: {index_url}")
               try:
-                  r = requests.get(index_url, timeout=30)
+                  r = requests.get(index_url, headers=headers, timeout=30)
                   r.raise_for_status()
                   
-                  # 解压 Packages.gz 内容
                   content = gzip.decompress(r.content).decode('utf-8')
                   
-                  # 2. 解析文件名
                   for line in content.split('\n'):
                       if line.startswith('Filename:'):
                           filename = line.split(': ')[1].strip()
+                          # 构造完整下载地址
                           file_url = f"{base_url}/{sub}/{filename}"
                           local_path = os.path.join(target_dir, filename)
                           
-                          # 3. 下载具体 IPK 文件
                           if not os.path.exists(local_path):
-                              print(f"下载: {filename}")
-                              # 尝试下载，增加重试机制
-                              success = False
-                              for attempt in range(3):
-                                  try:
-                                      fr = requests.get(file_url, stream=True, timeout=60)
-                                      fr.raise_for_status()
+                              print(f"Downloading: {filename}")
+                              try:
+                                  fr = requests.get(file_url, headers=headers, stream=True, timeout=60)
+                                  if fr.status_code == 200:
                                       with open(local_path, 'wb') as f:
                                           for chunk in fr.iter_content(chunk_size=8192):
                                               f.write(chunk)
-                                      success = True
-                                      break
-                                  except Exception as e:
-                                      print(f"下载失败 (重试 {attempt+1}): {e}")
-                              
-                              if not success:
-                                  print(f"错误: 无法下载 {filename}")
+                                  else:
+                                      print(f"Failed to download {filename}: Status {fr.status_code}")
+                              except Exception as e:
+                                  print(f"Error downloading {filename}: {e}")
 
               except Exception as e:
-                  print(f"获取索引失败 {sub}: {e}")
+                  print(f"Failed to fetch index for {sub}: {e}")
 
-          print("所有文件下载完成。")
+          print("Download finished.")
           EOF
           
-          # 运行下载脚本
           python3 downloader.py
 
       - name: 创建安装脚本 (install.sh)
         run: |
           cd passwall_${{ matrix.arch }}
           
-          # 这是一个原生的 Shell 脚本，运行在你的 iStoreOS 上
           cat <<EOF > install.sh
           #!/bin/sh
-          echo "=========================================="
-          echo "Passwall 离线安装器 (适配 iStoreOS)"
-          echo "源: ybfl.net (SourceForge)"
-          echo "=========================================="
+          echo "Installing Passwall for iStoreOS..."
           
-          # 检查目录
           if [ -d "./packages" ]; then
               cd packages
           else
-              echo "错误：找不到安装包目录！"
+              echo "Package directory not found!"
               exit 1
           fi
 
-          echo "正在批量安装 IPK..."
-          # iStoreOS 核心可能与源里的不完全一致，所以必须加 --force-depends
-          # 这不会损坏系统，只是忽略版本号检查
+          echo "Installing IPKs..."
           opkg install *.ipk --force-depends --force-overwrite
           
           if [ \$? -eq 0 ]; then
-              echo "------------------------------------------"
-              echo "安装成功！"
-              echo "请进入 iStoreOS 后台 -> 服务 -> Passwall 检查。"
-              echo "建议重启一次路由器以确保所有服务生效。"
-              echo "------------------------------------------"
+              echo "Success! Please refresh your web interface."
           else
-              echo "安装过程中有警告，通常可以忽略。"
-              echo "请尝试刷新后台页面。"
+              echo "Installation finished with warnings (normal for iStoreOS)."
           fi
-          
-          # 清理临时文件 (可选)
-          # rm -rf /tmp/passwall_install
           EOF
           
           chmod +x install.sh
@@ -147,17 +124,13 @@ jobs:
       - name: 制作 .run 文件
         run: |
           cd makeself
-          
-          # 生成文件名，例如 Passwall_iStoreOS_x86_64.run
           OUT_NAME="Passwall_iStoreOS_${{ matrix.arch }}_$(date +'%Y%m%d').run"
-          
           ./makeself.sh ../passwall_${{ matrix.arch }}/ $OUT_NAME "Passwall for iStoreOS" ./install.sh
           
-          # 移动到上传区
           mkdir -p ../output
           mv $OUT_NAME ../output/
 
-      - name: 上传 Artifact (备份)
+      - name: 上传 Artifact
         uses: actions/upload-artifact@v4
         with:
           name: passwall_${{ matrix.arch }}
@@ -171,6 +144,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: true 
           
       - name: 发布 Release
         uses: softprops/action-gh-release@v1
@@ -179,17 +153,4 @@ jobs:
         with:
           tag_name: "iStoreOS-Build-$(date +'%Y.%m.%d')"
           name: "Passwall for iStoreOS (ybfl源) $(date +'%Y.%m.%d')"
-          body: |
-            Passwall 离线安装包 - 专为 iStoreOS 优化
-            
-            **包含架构：**
-            - `x86_64`: 适用于常见的英特尔/AMD 软路由。
-            - `aarch64`: 适用于 R2S, R4S, R68s, RK3568 等 ARM 设备。
-            
-            **安装说明：**
-            1. 下载对应的 `.run` 文件。
-            2. 上传到路由器 `/tmp` 目录。
-            3. 执行命令：`chmod +x 文件名.run && ./文件名.run`
-            
-            *数据来源: sourceforge.net/projects/openwrt-passwall-build*
-          files: artifacts/**/*
+          files: artifacts/*.run
