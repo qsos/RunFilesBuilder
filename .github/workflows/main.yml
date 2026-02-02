@@ -11,37 +11,54 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout your repo
+      - name: Checkout repo
         uses: actions/checkout@v4
-
-      - name: Show repo tree (debug)
-        run: |
-          echo "===== YOUR REPO TREE ====="
-          ls -R .
-          echo "=========================="
 
       - name: Clone RunFilesBuilder
         run: |
           git clone https://github.com/wukongdaily/RunFilesBuilder.git
 
-      - name: Show RunFilesBuilder tree (debug)
-        run: |
-          echo "===== RunFilesBuilder TREE ====="
-          ls -R RunFilesBuilder | head -n 200
-          echo "================================"
-
-      - name: Copy PassWall install script
+      - name: Prepare RUN structure
         run: |
           mkdir -p RunFilesBuilder/x86_64/files
-          cp shell/ps_install.sh RunFilesBuilder/x86_64/files/
+
+          # 写入 ps_install.sh（不依赖你仓库原文件）
+          cat > RunFilesBuilder/x86_64/files/ps_install.sh << 'EOF'
+          #!/bin/sh
+
+          echo "=== PassWall Install Script ==="
+
+          # 添加 key
+          wget -O /tmp/passwall.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/passwall.pub
+          opkg-key add /tmp/passwall.pub
+
+          # 读取系统信息
+          . /etc/openwrt_release
+          release=${DISTRIB_RELEASE%.*}
+          arch=$DISTRIB_ARCH
+
+          # 写入 feed
+          cat >> /etc/opkg/customfeeds.conf << FEED
+          src/gz passwall_luci https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-$release/$arch/passwall_luci
+          src/gz passwall_packages https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-$release/$arch/passwall_packages
+          FEED
+
+          opkg update
+          opkg install luci-app-passwall luci-i18n-passwall-zh-cn
+
+          /etc/init.d/uhttpd restart
+
+          echo "=== PassWall Install Finished ==="
+          EOF
+
           chmod +x RunFilesBuilder/x86_64/files/ps_install.sh
 
-      - name: Build RUN
+      - name: Build RUN file
         run: |
           cd RunFilesBuilder
-          bash scripts/build.sh x86_64
+          bash RunFilesBuilder.sh x86_64
 
-      - name: Upload RUN artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: passwall-run
