@@ -11,17 +11,23 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Clone RunFilesBuilder
+      - name: Ensure ps_install.sh exists
         run: |
-          git clone https://github.com/wukongdaily/RunFilesBuilder.git
+          echo "==== DEBUG TREE ===="
+          ls -R .
+          echo "===================="
+          if [ ! -f RunFilesBuilder/shell/ps_install.sh ]; then
+            echo "ERROR: RunFilesBuilder/shell/ps_install.sh NOT FOUND"
+            exit 1
+          fi
 
-      - name: Prepare files
+      - name: Prepare RunFilesBuilder files
         run: |
           mkdir -p RunFilesBuilder/x86_64/files
-          cp files/ps_install.sh RunFilesBuilder/x86_64/files/
+          cp RunFilesBuilder/shell/ps_install.sh RunFilesBuilder/x86_64/files/
           chmod +x RunFilesBuilder/x86_64/files/ps_install.sh
 
       - name: Build RUN
@@ -29,7 +35,7 @@ jobs:
           cd RunFilesBuilder
           bash build.sh x86_64
 
-      - name: Upload artifact
+      - name: Upload RUN artifact
         uses: actions/upload-artifact@v4
         with:
           name: passwall-run
