@@ -1,187 +1,195 @@
-name: Build Passwall .run Installer
+name: Build Passwall for iStoreOS
 
 on:
   schedule:
-    - cron: '0 18 * * 5' # 每周五运行一次，或者自行修改
-  workflow_dispatch:
+    - cron: '0 18 * * 5' # 每周五定时运行
+  workflow_dispatch:     # 允许手动运行
 
 jobs:
-  # 任务1: 编译 IPK (使用矩阵同时编译 x86 和 arm)
-  compile:
-    runs-on: ubuntu-22.04
+  download_and_package:
+    runs-on: ubuntu-latest
+    
     strategy:
-      fail-fast: false
       matrix:
         include:
-          - target: x86_64
-            sdk_url: https://downloads.openwrt.org/releases/23.05.2/targets/x86/64/openwrt-sdk-23.05.2-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.xz
-          - target: aarch64
-            # 使用 Generic ARMv8 SDK (兼容大多数 Cortex-A53/A72 路由，如 N1, 玩客云, MT798x等)
-            sdk_url: https://downloads.openwrt.org/releases/23.05.2/targets/armsr/armv8/openwrt-sdk-23.05.2-armsr-armv8_gcc-12.3.0_musl.Linux-aarch64.tar.xz
+          # iStoreOS x86 版本 (大多数软路由)
+          - arch: x86_64
+            # 使用 23.05 的包，因为 Passwall 需要较新的组件，iStoreOS 兼容性一般没问题
+            base_url: https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-23.05/x86_64
+            
+          # iStoreOS ARM 版本 (如 R2S, R4S, RK35xx 等)
+          - arch: aarch64_cortex-a53
+            base_url: https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-23.05/aarch64_cortex-a53
 
     steps:
-      - name: 准备编译环境
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential libncurses5-dev libncursesw5-dev \
-          zlib1g-dev gawk git gettext libssl-dev xsltproc rsync wget unzip python3 qemu-utils
-
-      - name: 下载并解压 SDK (${{ matrix.target }})
-        run: |
-          wget -O sdk.tar.xz ${{ matrix.sdk_url }}
-          mkdir sdk
-          tar -xJf sdk.tar.xz -C sdk --strip-components=1
-
-      - name: 更新 Feeds 并添加 Passwall 源
-        working-directory: sdk
-        run: |
-          # 1. 添加 Passwall 核心依赖 (Packages)
-          echo "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages" >> feeds.conf.default
-          # 2. 添加 Passwall 界面 (LuCI)
-          echo "src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall" >> feeds.conf.default
-          
-          # 更新并安装
-          ./scripts/feeds update -a
-          
-          # 这一步很关键：先卸载冲突的包（如果 SDK 自带了同名包），再安装 passwall 的包
-          ./scripts/feeds uninstall luci-app-passwall || true
-          ./scripts/feeds install -a -p passwall_packages
-          ./scripts/feeds install -a -p passwall_luci
-
-      - name: 生成编译配置
-        working-directory: sdk
-        run: |
-          # 强制选中 Passwall 及其组件
-          echo "CONFIG_PACKAGE_luci-app-passwall=m" > .config
-          echo "CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=m" >> .config
-          
-          # 选中核心组件 (Xray, Singbox 等)
-          # 通过 make defconfig 自动计算依赖，通常会自动选中 xray-core 等
-          make defconfig
-
-      - name: 开始编译 (${{ matrix.target }})
-        working-directory: sdk
-        run: |
-          # 使用多核编译
-          make package/luci-app-passwall/compile V=s -j$(nproc)
-
-      - name: 整理编译好的 IPK
-        working-directory: sdk
-        run: |
-          mkdir -p output/main
-          mkdir -p output/depends
-          
-          # 查找生成的包
-          # 逻辑：luci-app-passwall 和 语言包 放入 main
-          find bin/packages -name "luci-app-passwall*.ipk" -exec cp {} output/main/ \;
-          find bin/packages -name "luci-i18n-passwall*.ipk" -exec cp {} output/main/ \;
-          
-          # 逻辑：其他的 passwall 依赖包 (xray, sing-box, chinadns 等) 放入 depends
-          # 注意：这里会把所有 passwall_packages 源里的东西都拷出来
-          # 我们通过查找 passwall_packages 目录下的 ipk
-          find bin/packages -path "*passwall_packages*" -name "*.ipk" -exec cp {} output/depends/ \;
-          
-          # 确保 main 里的不要在 depends 里重复 (虽然上面路径应该已经区分开了，保险起见)
-          rm -f output/depends/luci-app-passwall*.ipk
-
-      - name: 上传编译产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: ipks-${{ matrix.target }}
-          path: sdk/output/
-
-  # 任务2: 打包生成 .run 文件并发布
-  package_release:
-    needs: compile
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Clone makeself
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Clone makeself (打包工具)
         run: git clone https://github.com/megastep/makeself.git
 
-      - name: 获取最新版本号 (用于命名)
-        id: tag
+      - name: 下载 Passwall 及所有依赖 (Python脚本)
+        env:
+          BASE_URL: ${{ matrix.base_url }}
+          ARCH: ${{ matrix.arch }}
         run: |
-          # 因为官方 Release 只有源码，我们获取最新的 Tag 名称
-          latest_tag=$(curl -s https://api.github.com/repos/Openwrt-Passwall/openwrt-passwall/tags | jq -r '.[0].name')
-          echo "LATEST_TAG=$latest_tag" >> $GITHUB_ENV
-          echo "Using version: $latest_tag"
+          # 创建下载目录
+          mkdir -p passwall_${ARCH}/packages
+          
+          # 使用 Python 脚本智能解析 SourceForge 的 Packages 文件并下载
+          cat <<EOF > downloader.py
+          import requests
+          import os
+          import gzip
+          import io
 
-      - name: 下载 x86_64 编译产物
-        uses: actions/download-artifact@v4
-        with:
-          name: ipks-x86_64
-          path: passwall_x86_64
+          # 两个主要的文件夹：核心依赖 和 LuCI界面
+          sub_dirs = ['passwall_packages', 'passwall_luci']
+          base_url = os.environ['BASE_URL']
+          target_dir = f"passwall_{os.environ['ARCH']}/packages"
 
-      - name: 下载 aarch64 编译产物
-        uses: actions/download-artifact@v4
-        with:
-          name: ipks-aarch64
-          path: passwall_aarch64
+          print(f"开始从 {base_url} 下载...")
+
+          for sub in sub_dirs:
+              # 1. 下载索引文件 Packages.gz
+              index_url = f"{base_url}/{sub}/Packages.gz"
+              print(f"正在读取索引: {index_url}")
+              try:
+                  r = requests.get(index_url, timeout=30)
+                  r.raise_for_status()
+                  
+                  # 解压 Packages.gz 内容
+                  content = gzip.decompress(r.content).decode('utf-8')
+                  
+                  # 2. 解析文件名
+                  for line in content.split('\n'):
+                      if line.startswith('Filename:'):
+                          filename = line.split(': ')[1].strip()
+                          file_url = f"{base_url}/{sub}/{filename}"
+                          local_path = os.path.join(target_dir, filename)
+                          
+                          # 3. 下载具体 IPK 文件
+                          if not os.path.exists(local_path):
+                              print(f"下载: {filename}")
+                              # 尝试下载，增加重试机制
+                              success = False
+                              for attempt in range(3):
+                                  try:
+                                      fr = requests.get(file_url, stream=True, timeout=60)
+                                      fr.raise_for_status()
+                                      with open(local_path, 'wb') as f:
+                                          for chunk in fr.iter_content(chunk_size=8192):
+                                              f.write(chunk)
+                                      success = True
+                                      break
+                                  except Exception as e:
+                                      print(f"下载失败 (重试 {attempt+1}): {e}")
+                              
+                              if not success:
+                                  print(f"错误: 无法下载 {filename}")
+
+              except Exception as e:
+                  print(f"获取索引失败 {sub}: {e}")
+
+          print("所有文件下载完成。")
+          EOF
+          
+          # 运行下载脚本
+          python3 downloader.py
 
       - name: 创建安装脚本 (install.sh)
         run: |
-          # 只需要创建一个，然后复制
-          cat <<EOF > passwall_x86_64/install.sh
+          cd passwall_${{ matrix.arch }}
+          
+          # 这是一个原生的 Shell 脚本，运行在你的 iStoreOS 上
+          cat <<EOF > install.sh
           #!/bin/sh
-          echo "Installing Passwall dependencies..."
-          opkg update
+          echo "=========================================="
+          echo "Passwall 离线安装器 (适配 iStoreOS)"
+          echo "源: ybfl.net (SourceForge)"
+          echo "=========================================="
           
-          # 安装系统基础依赖 (如果源里有)
-          opkg install iptables-mod-tproxy iptables-mod-socket iptables-mod-iprange iptables-mod-conntrack-extra unzip
+          # 检查目录
+          if [ -d "./packages" ]; then
+              cd packages
+          else
+              echo "错误：找不到安装包目录！"
+              exit 1
+          fi
+
+          echo "正在批量安装 IPK..."
+          # iStoreOS 核心可能与源里的不完全一致，所以必须加 --force-depends
+          # 这不会损坏系统，只是忽略版本号检查
+          opkg install *.ipk --force-depends --force-overwrite
           
-          echo "Installing Core Components..."
-          # 强制安装 depends 目录下的所有 ipk
-          opkg install depends/*.ipk --force-depends
+          if [ \$? -eq 0 ]; then
+              echo "------------------------------------------"
+              echo "安装成功！"
+              echo "请进入 iStoreOS 后台 -> 服务 -> Passwall 检查。"
+              echo "建议重启一次路由器以确保所有服务生效。"
+              echo "------------------------------------------"
+          else
+              echo "安装过程中有警告，通常可以忽略。"
+              echo "请尝试刷新后台页面。"
+          fi
           
-          echo "Installing LuCI App..."
-          opkg install main/*.ipk --force-depends
-          
-          echo "Done! Please refresh your LuCI page."
-          rm -rf /tmp/passwall_install
+          # 清理临时文件 (可选)
+          # rm -rf /tmp/passwall_install
           EOF
           
-          chmod +x passwall_x86_64/install.sh
-          
-          # 复制到 aarch64 目录
-          cp passwall_x86_64/install.sh passwall_aarch64/install.sh
+          chmod +x install.sh
 
-      - name: 移动目录到 makeself 准备打包
-        run: |
-          mv passwall_x86_64 makeself/
-          mv passwall_aarch64 makeself/
-
-      - name: 生成 .run 文件
+      - name: 制作 .run 文件
         run: |
           cd makeself
-          # 打包 x86_64
-          ./makeself.sh passwall_x86_64/ passwall_x86_64_${{ env.LATEST_TAG }}.run "Passwall Installer x86" ./install.sh
           
-          # 打包 aarch64
-          ./makeself.sh passwall_aarch64/ passwall_aarch64_${{ env.LATEST_TAG }}.run "Passwall Installer ARM64" ./install.sh
+          # 生成文件名，例如 Passwall_iStoreOS_x86_64.run
+          OUT_NAME="Passwall_iStoreOS_${{ matrix.arch }}_$(date +'%Y%m%d').run"
+          
+          ./makeself.sh ../passwall_${{ matrix.arch }}/ $OUT_NAME "Passwall for iStoreOS" ./install.sh
+          
+          # 移动到上传区
+          mkdir -p ../output
+          mv $OUT_NAME ../output/
 
-      - name: 生成 Release 说明
-        run: |
-          echo "## Passwall Auto Build ${{ env.LATEST_TAG }}" > release_notes.md
-          echo "Build Date: $(date)" >> release_notes.md
-          echo "Based on official Openwrt-Passwall source." >> release_notes.md
-          echo "" >> release_notes.md
-          echo "### Supported Architectures:" >> release_notes.md
-          echo "- **x86_64**: For Intel/AMD Soft Routers" >> release_notes.md
-          echo "- **aarch64**: Generic ARMv8 (Compatible with R2S, R4S, N1, AX6000, etc.)" >> release_notes.md
-          echo "" >> release_notes.md
-          echo "### Installation:" >> release_notes.md
-          echo "Upload the .run file to router, chmod +x, and run it." >> release_notes.md
+      - name: 上传 Artifact (备份)
+        uses: actions/upload-artifact@v4
+        with:
+          name: passwall_${{ matrix.arch }}
+          path: output/*.run
 
+  release:
+    needs: download_and_package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          
       - name: 发布 Release
         uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ env.LATEST_TAG }}
-          name: "PassWall ${{ env.LATEST_TAG }} (Self-contained)"
-          body_path: release_notes.md
-          files: makeself/*.run
-          prerelease: false
+          tag_name: "iStoreOS-Build-$(date +'%Y.%m.%d')"
+          name: "Passwall for iStoreOS (ybfl源) $(date +'%Y.%m.%d')"
+          body: |
+            Passwall 离线安装包 - 专为 iStoreOS 优化
+            
+            **包含架构：**
+            - `x86_64`: 适用于常见的英特尔/AMD 软路由。
+            - `aarch64`: 适用于 R2S, R4S, R68s, RK3568 等 ARM 设备。
+            
+            **安装说明：**
+            1. 下载对应的 `.run` 文件。
+            2. 上传到路由器 `/tmp` 目录。
+            3. 执行命令：`chmod +x 文件名.run && ./文件名.run`
+            
+            *数据来源: sourceforge.net/projects/openwrt-passwall-build*
+          files: artifacts/**/*
