@@ -1,74 +1,226 @@
-name: Make Passwall run files
+name: Build Passwall .run (Official Repo Method)
 
 on:
   schedule:
-    - cron: '0 */12 * * *'
-  workflow_dispatch: # 只要这一行缩进正确，按钮就会回来
+    - cron: '0 18 * * 5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
-  build:
+  build_installer:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      releases: write
+    
+    strategy:
+      matrix:
+        include:
+          # --- x86_64 (Intel/AMD 软路由) ---
+          - arch: x86_64
+            # 对应教程中的 https://.../releases/packages-23.05/x86_64/...
+            rss_base: https://sourceforge.net/projects/openwrt-passwall-build/rss?path=/releases/packages-23.05/x86_64
+            
+          # --- aarch64 (R2S, R4S, N1, RK3568) ---
+          - arch: aarch64_cortex-a53
+            # 对应教程中的 https://.../releases/packages-23.05/aarch64_cortex-a53/...
+            rss_base: https://sourceforge.net/projects/openwrt-passwall-build/rss?path=/releases/packages-23.05/aarch64_cortex-a53
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-      - name: Set Release Tag
-        run: |
-          echo "RELEASE_TAG=$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
-
-      - name: Create Installer Script
-        run: |
-          mkdir -p output
-          # 写入你提供的最新官方安装逻辑
-          cat <<'EOF' > output/install.sh
-#!/bin/sh
-echo "--- 开始 Passwall 官方源安装流程 ---"
-
-# 1. 下载并添加 Key
-wget -O passwall.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/passwall.pub
-opkg-key add passwall.pub
-rm passwall.pub
-
-# 2. 自动识别架构并添加软件源
-read release arch << EOM
-$(. /etc/openwrt_release ; echo ${DISTRIB_RELEASE%.*} $DISTRIB_ARCH)
-EOM
-
-# 清除旧的同名源，防止冲突
-sed -i '/passwall/d' /etc/opkg/customfeeds.conf
-
-for feed in passwall_luci passwall_packages passwall2; do
-  echo "src/gz $feed https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-$release/$arch/$feed" >> /etc/opkg/customfeeds.conf
-done
-
-# 3. 安装软件
-opkg update
-opkg install luci-app-passwall luci-app-passwall2 luci-i18n-passwall-zh-cn luci-i18n-passwall2-zh-cn
-
-# 4. 重启服务
-/etc/init.d/uhttpd restart
-echo "安装完成！"
-EOF
-          chmod +x output/install.sh
-
-      - name: Package with Makeself
-        run: |
-          git clone --depth 1 https://github.com/megastep/makeself.git
-          ./makeself/makeself.sh output/ passwall_installer.run "Passwall Installer" ./install.sh
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: "PassWall-OneClick-${{ env.RELEASE_TAG }}"
-          body: |
-            ### Passwall 一键安装包 (官方源模式)
-            此包会自动配置软件源并安装 Passwall 1 & 2。
-            **用法：** 下载后执行 `sh passwall_installer.run` 即可。
-          files: "*.run"
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Clone makeself
+        run: git clone https://github.com/megastep/makeself.git
+
+      - name: 抓取 Passwall 文件 (Python脚本)
+        env:
+          RSS_BASE: ${{ matrix.rss_base }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          # 建立目录结构
+          mkdir -p passwall_installer/packages
+          
+          # 1. 下载公钥 (教程步骤二)
+          wget -O passwall_installer/passwall.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/passwall.pub
+          
+          # 2. 运行抓取脚本
+          cat <<EOF > downloader.py
+          import requests
+          import os
+          import xml.etree.ElementTree as ET
+          import time
+
+          # 教程中提到的两个关键文件夹
+          # 如果你想用 passwall2，可以把下面的 'passwall_luci' 改成 'passwall2'
+          feeds = ['passwall_packages', 'passwall_luci']
+          
+          base_rss = os.environ['RSS_BASE']
+          target_dir = "passwall_installer/packages"
+          
+          headers = {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          }
+
+          total_downloaded = 0
+
+          for feed in feeds:
+              # 拼接 RSS 地址，例如: .../rss?path=/releases/packages-23.05/x86_64/passwall_packages
+              rss_url = f"{base_rss}/{feed}"
+              print(f"\nScanning Feed: {feed}")
+              print(f"URL: {rss_url}")
+              
+              try:
+                  r = requests.get(rss_url, headers=headers, timeout=30)
+                  r.raise_for_status()
+                  
+                  root = ET.fromstring(r.content)
+                  items = root.findall('./channel/item')
+                  print(f"Found {len(items)} items in RSS.")
+
+                  for item in items:
+                      title = item.find('title').text
+                      link = item.find('link').text
+                      
+                      # 只下载 .ipk 文件
+                      if title.endswith('.ipk'):
+                          local_path = os.path.join(target_dir, title)
+                          
+                          if not os.path.exists(local_path):
+                              print(f"Downloading: {title}")
+                              success = False
+                              for attempt in range(3):
+                                  try:
+                                      # 启用 stream=True 以便稳定下载大文件
+                                      with requests.get(link, headers=headers, stream=True, timeout=60) as fr:
+                                          fr.raise_for_status()
+                                          with open(local_path, 'wb') as f:
+                                              for chunk in fr.iter_content(chunk_size=8192):
+                                                  f.write(chunk)
+                                      success = True
+                                      total_downloaded += 1
+                                      break
+                                  except Exception as e:
+                                      print(f"  Retry {attempt+1}: {e}")
+                                      time.sleep(2)
+                              
+                              if not success:
+                                  print(f"  FAILED to download {title}")
+
+              except Exception as e:
+                  print(f"Error parsing RSS {feed}: {e}")
+
+          # 检查文件完整性
+          dir_size = sum(os.path.getsize(os.path.join(target_dir, f)) for f in os.listdir(target_dir) if os.path.isfile(os.path.join(target_dir, f)))
+          print(f"\nTotal files: {total_downloaded}")
+          print(f"Total size: {dir_size / 1024 / 1024:.2f} MB")
+
+          if dir_size < 1024 * 1024: # 如果总大小小于 1MB，报错
+              print("ERROR: Download seems incomplete (Too small).")
+              exit(1)
+          
+          print("Download verified.")
+          EOF
+          
+          python3 downloader.py
+
+      - name: 创建安装脚本 (install.sh)
+        run: |
+          cd passwall_installer
+          
+          # 这个脚本模拟了教程中的安装过程，但是是离线的
+          cat <<EOF > install.sh
+          #!/bin/sh
+          echo "==========================================="
+          echo "Passwall 离线安装器 (基于官方 Build 源)"
+          echo "==========================================="
+          
+          # 1. 导入 Key (教程推荐)
+          if [ -f "passwall.pub" ]; then
+              echo "添加公钥..."
+              opkg-key add passwall.pub
+          fi
+
+          if [ -d "./packages" ]; then
+              cd packages
+          else
+              echo "错误：找不到 packages 目录！"
+              exit 1
+          fi
+
+          echo "开始安装..."
+          # 批量安装所有下载下来的包
+          # --force-depends 确保 iStoreOS 即使内核版本有细微差异也能安装
+          opkg install *.ipk --force-depends --force-overwrite
+          
+          if [ \$? -eq 0 ]; then
+              echo "安装成功！"
+              echo "如果之前有旧配置，建议重启服务: /etc/init.d/uhttpd restart"
+          else
+              echo "安装完成 (带有警告)，请刷新后台页面测试。"
+          fi
+          EOF
+          
+          chmod +x install.sh
+
+      - name: 打包生成 .run
+        run: |
+          cd makeself
+          
+          DATE=$(date +'%Y%m%d')
+          FILENAME="Passwall_${{ matrix.arch }}_OfficialRepo_${DATE}.run"
+          
+          ./makeself.sh ../passwall_installer/ $FILENAME "Passwall Installer" ./install.sh
+          
+          mkdir -p ../output
+          mv $FILENAME ../output/
+
+      - name: 上传 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Passwall_${{ matrix.arch }}
+          path: output/*.run
+
+  release:
+    needs: build_installer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true 
+      
+      - name: Generate Vars
+        run: |
+          echo "RELEASE_TAG=Official-$(date +'%Y.%m.%d')" >> $GITHUB_ENV
+          echo "RELEASE_DATE=$(date +'%Y.%m.%d')" >> $GITHUB_ENV
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "Passwall 官方源版 ${{ env.RELEASE_DATE }}"
+          body: |
+            # Passwall 离线安装包 (官方源镜像版)
+            
+            基于 `openwrt-passwall-build` (SourceForge) 制作。
+            完全遵循官方教程的目录结构。
+            
+            **包含内容：**
+            - `passwall_packages`: 完整核心依赖 (Xray, Sing-box 等)
+            - `passwall_luci`: 最新界面插件
+            
+            **使用方法：**
+            1. 上传 `.run` 文件到路由器 `/tmp` 目录。
+            2. 运行: `chmod +x 文件名.run && ./文件名.run`
+          files: artifacts/*.run
