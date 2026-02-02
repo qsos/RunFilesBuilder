@@ -1,103 +1,90 @@
-name: Make Passwall run files (Optimized)
+name: Make Passwall One-Click Installer
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
-  workflow_dispatch:
+    - cron: '0 */12 * * *' # 每12小时检查一次
+  workflow_dispatch:      # 必须保留这个，手动触发按钮才会出现
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      releases: write
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fetch latest release tag
-        id: fetch_info
+      - name: Prepare Release Info
+        id: date
         run: |
-          # 设定新的官方地址
-          REPO="Openwrt-Passwall/openwrt-passwall"
-          LATEST_TAG=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | jq -r .tag_name)
-          echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_ENV
-          echo "REPO=$REPO" >> $GITHUB_ENV
+          echo "DATE=$(date +'%Y.%m.%d')" >> $GITHUB_ENV
 
-      - name: Download Passwall Assets
+      - name: Create One-Click Scripts
         run: |
-          mkdir -p downloads
-          # 精准获取包含 x86_64, aarch64 和 luci 的下载链接
-          ASSETS=$(curl -s "https://api.github.com/repos/${{ env.REPO }}/releases/latest" | jq -r '.assets[].browser_download_url')
-          for url in $ASSETS; do
-            if [[ "$url" == *"x86_64.zip"* ]]; then
-              curl -L -o downloads/x86_64.zip "$url"
-            elif [[ "$url" == *"aarch64_cortex-a53.zip"* ]]; then
-              curl -L -o downloads/aarch64.zip "$url"
-            elif [[ "$url" == *"luci-"*".ipk"* ]]; then
-              curl -L -o "downloads/$(basename $url)" "$url"
-            fi
-          done
-
-      - name: Setup Makeself
-        run: |
-          git clone --depth 1 https://github.com/megastep/makeself.git
-          sudo cp makeself/makeself.sh /usr/local/bin/
-
-      - name: Create Self-Extracting Packages
-        run: |
-          platforms=("x86_64" "aarch64")
-          for arch in "${platforms[@]}"; do
-            mkdir -p "pkg_$arch/ipks"
-            unzip "downloads/$arch.zip" -d "pkg_$arch/ipks/"
-            cp downloads/luci-*.ipk "pkg_$arch/ipks/"
-            
-            # --- 关键修改：根据新的安装方式编写 install.sh ---
-            cat <<EOF > "pkg_$arch/install.sh"
+          mkdir -p output
+          
+          # 创建通用一键安装脚本
+          cat <<EOF > output/install_passwall.sh
 #!/bin/sh
-echo "--- Starting Passwall New Installation Mode ---"
+echo "--- Passwall 一键安装/升级脚本 ---"
 
-# 1. 更新软件源
-opkg update
-
-# 2. 处理 dnsmasq 冲突 (这是新版安装最核心的步骤)
-if opkg list-installed | grep -q "^dnsmasq -"; then
-    echo "Removing old dnsmasq to avoid conflict..."
-    opkg remove dnsmasq --force-depends
+# 1. 检查网络环境
+if ! curl -I -s --connect-timeout 5 https://google.com > /dev/null; then
+    echo "警告: 检测到当前无法访问 Google，请确保软路由已开启魔法上网，否则安装可能失败。"
 fi
 
-# 3. 安装核心依赖环境 (适配新版 nftables/iptables)
-echo "Installing core dependencies..."
-opkg install dnsmasq-full
-opkg install kmod-nft-tproxy kmod-nft-socket kmod-nft-iprange 2>/dev/null || echo "Notice: Some kmods might be built-in."
+# 2. 添加 OPKG Key
+echo "正在添加安装密钥..."
+wget -qO passwall.pub https://master.dl.sourceforge.net/project/openwrt-passwall-build/passwall.pub
+opkg-key add passwall.pub
+rm passwall.pub
 
-# 4. 安装所有下载的 ipk 包
-echo "Installing Passwall packages..."
-opkg install ipks/*.ipk --force-reinstall --force-maintainer
+# 3. 添加软件源 (Repository)
+echo "正在配置软件源..."
+# 清理旧的配置，避免重复添加
+sed -i '/passwall/d' /etc/opkg/customfeeds.conf
 
-# 5. 清理缓存
-rm -rf /tmp/luci-modulecache/ /tmp/luci-indexcache
-echo "Installation completed. Please refresh your LuCI web interface."
+read release arch << EOM
+\$(. /etc/openwrt_release ; echo \${DISTRIB_RELEASE%.*} \$DISTRIB_ARCH)
+EOM
+
+for feed in passwall_luci passwall_packages passwall2; do
+  echo "src/gz \$feed https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-\$release/\$arch/\$feed" >> /etc/opkg/customfeeds.conf
+done
+
+# 4. 执行安装
+echo "正在更新列表并安装 Passwall..."
+opkg update
+opkg install luci-app-passwall luci-i18n-passwall-zh-cn
+opkg install luci-app-passwall2 luci-i18n-passwall2-zh-cn
+
+# 5. 重启服务
+echo "重启 Web 服务..."
+/etc/init.d/uhttpd restart
+echo "--- 安装完成！请刷新浏览器界面 ---"
 EOF
-            chmod +x "pkg_$arch/install.sh"
-            
-            # 使用 makeself 打包
-            makeself.sh "pkg_$arch" "passwall_${arch}_${{ env.LATEST_TAG }}.run" "Passwall Installer by Github Action" ./install.sh
-          done
+          chmod +x output/install_passwall.sh
 
-      - name: Prepare Release Notes
+      - name: Setup Makeself and Pack
         run: |
-          echo "### 📦 Passwall ${{ env.LATEST_TAG }} 自动集成包" > release.md
-          echo "- **来源**: [Openwrt-Passwall](${{ env.REPO }})" >> release.md
-          echo "- **架构**: x86_64, aarch64_cortex-a53" >> release.md
-          echo "- **安装方法**: 在终端运行 \`sh passwall_xxx.run\` 即可" >> release.md
-          echo -e "\n**原版更新日志:**\n" >> release.md
-          curl -s "https://api.github.com/repos/${{ env.REPO }}/releases/latest" | jq -r .body >> release.md
+          git clone --depth 1 https://github.com/megastep/makeself.git
+          ./makeself/makeself.sh output/ Passwall_Installer.run "Passwall Installer" ./install_passwall.sh
 
-      - name: Upload and Release
+      - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.LATEST_TAG }}
-          name: "PassWall-${{ env.LATEST_TAG }}"
-          body_path: release.md
+          tag_name: ${{ env.DATE }}
+          name: "PassWall-OneClick-${{ env.DATE }}"
+          body: |
+            ## Passwall 最新一键安装包
+            基于官方最新推荐方式制作。
+            
+            ### 使用方法:
+            1. 下载 `Passwall_Installer.run` 到软路由
+            2. 运行 `sh Passwall_Installer.run`
+            3. 脚本会自动添加源并安装 Passwall 1/2 以及中文语言包。
           files: "*.run"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
