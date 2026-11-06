@@ -1,0 +1,63 @@
+name: Make NaiLink run files
+
+on:
+  workflow_dispatch:
+
+jobs:
+  make-run:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 安装 makeself 和 jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y makeself curl jq
+
+      - name: 动态获取 NaiLink x86_64 IPK 下载链接
+        id: get_ipk
+        run: |
+          # 调用 GitHub API 获取 openwrt-v0.6.75 这个 Release 的所有 Assets
+          ASSETS=$(curl -s https://api.github.com/repos/slobys/NaiLink/releases/tags/openwrt-v0.6.75)
+          # 用 jq 筛选出文件名同时包含 x86_64 和 .ipk 的下载链接
+          DOWNLOAD_URL=$(echo "$ASSETS" | jq -r '.assets[] | select(.name | test("x86_64") and test("\\.ipk$")) | .browser_download_url')
+          
+          if [ -z "$DOWNLOAD_URL" ]; then
+            echo "错误：未找到 x86_64 架构的 .ipk 文件，请检查 Release 页面。"
+            exit 1
+          fi
+          
+          echo "找到下载链接: $DOWNLOAD_URL"
+          echo "url=$DOWNLOAD_URL" >> $GITHUB_OUTPUT
+
+      - name: 下载 IPK 并准备 install.sh
+        run: |
+          mkdir -p x86_64
+          wget -O x86_64/nailink.ipk "${{ steps.get_ipk.outputs.url }}"
+          
+          # RunFilesBuilder 仓库通常自带 shell/install.sh，直接拷贝
+          cp shell/install.sh x86_64/install.sh
+          chmod +x x86_64/install.sh
+          ls -lh x86_64/
+
+      - name: 打包为 .run 文件
+        id: pack
+        run: |
+          mkdir -p output
+          VERSION="0.6.75" # 与 Tag openwrt-v0.6.75 对应
+          cd x86_64
+          makeself . "../output/NaiLink_x86_64_${VERSION}.run" \
+            "NaiLink x86_64 Installer v${VERSION}" \
+            ./install.sh
+          cd ..
+          ls -lh output/
+
+      - name: 上传 .run 文件到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "NaiLink_v${{ steps.pack.outputs.version }}"
+          name: "NaiLink v${{ steps.pack.outputs.version }}"
+          files: output/*.run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
