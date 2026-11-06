@@ -1,4 +1,4 @@
-name: Make NaiLink Complete run files
+name: Make NaiLink Official Installer
 
 on:
   workflow_dispatch:
@@ -13,57 +13,17 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y makeself curl jq
-
-      - name: Get NaiLink x86_64 IPK Assets
-        id: get_assets
-        run: |
-          ASSETS=$(curl -s https://api.github.com/repos/slobys/NaiLink/releases/tags/openwrt-v0.6.75)
-          
-          # 1. 筛选核心包：只要 x86_64 的 .ipk
-          CORE_URL=$(echo "$ASSETS" | jq -r '.assets[] | select(.name | test("x86_64") and test("\\.ipk$")) | .browser_download_url' | head -n 1)
-          
-          # 2. 筛选 LuCI 界面包：兼容 daed 或 nailink 命名
-          LUCI_URL=$(echo "$ASSETS" | jq -r '.assets[] | select((test("luci-app-daed") or test("luci-app-nailink")) and test("\\.ipk$")) | .browser_download_url' | head -n 1)
-          
-          # 3. 筛选中文语言包
-          I18N_URL=$(echo "$ASSETS" | jq -r '.assets[] | select((test("luci-i18n-daed-zh-cn") or test("luci-i18n-nailink-zh-cn")) and test("\\.ipk$")) | .browser_download_url' | head -n 1)
-
-          if [ -z "$CORE_URL" ]; then
-            echo "错误：未能找到 x86_64 核心 IPK"
-            exit 1
-          fi
-
-          echo "core_url=$CORE_URL" >> $GITHUB_OUTPUT
-          echo "luci_url=$LUCI_URL" >> $GITHUB_OUTPUT
-          echo "i18n_url=$I18N_URL" >> $GITHUB_OUTPUT
-
-      - name: Download IPK files
-        run: |
-          mkdir -p build
-          wget -O "build/nailink-core.ipk" "${{ steps.get_assets.outputs.core_url }}"
-          
-          if [ -n "${{ steps.get_assets.outputs.luci_url }}" ] && [ "${{ steps.get_assets.outputs.luci_url }}" != "null" ]; then
-            wget -O "build/luci-app.ipk" "${{ steps.get_assets.outputs.luci_url }}"
-          else
-            echo "警告：未找到独立的 LuCI 界面包，主包可能已包含界面。"
-          fi
-          
-          if [ -n "${{ steps.get_assets.outputs.i18n_url }}" ] && [ "${{ steps.get_assets.outputs.i18n_url }}" != "null" ]; then
-            wget -O "build/luci-i18n-zh-cn.ipk" "${{ steps.get_assets.outputs.i18n_url }}"
-          fi
-          ls -lh build/
+          sudo apt-get install -y makeself curl
 
       - name: Prepare install.sh
         run: |
+          mkdir -p build
           cat > build/install.sh << 'EOF'
           #!/bin/sh
-          echo "正在更新软件包列表..."
-          opkg update
-          echo "正在安装 NaiLink 及其界面..."
-          opkg install ./*.ipk
-          echo "安装完成。正在重启 LuCI 服务..."
-          /etc/init.d/uhttpd restart
+          echo "正在下载并执行 NaiLink 官方安装脚本..."
+          # 直接执行你提供的官方命令
+          nl=$(uclient-fetch -O- https://slobys.github.io/NaiLink/install.sh) && sh -c "${nl:?下载为空}" -- --menu
+          echo "NaiLink 安装流程已启动。"
           EOF
           chmod +x build/install.sh
 
@@ -73,8 +33,8 @@ jobs:
           mkdir -p output
           VERSION="0.6.75"
           cd build
-          makeself . "../output/NaiLink_Complete_x86_64_${VERSION}.run" \
-            "NaiLink Complete Installer (Core + LuCI) v${VERSION}" \
+          makeself . "../output/NaiLink_Official_x86_64_${VERSION}.run" \
+            "NaiLink Official Installer v${VERSION}" \
             ./install.sh
           cd ..
           ls -lh output/
@@ -82,8 +42,8 @@ jobs:
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "NaiLink_Complete_v${{ steps.pack.outputs.version }}"
-          name: "NaiLink Complete v${{ steps.pack.outputs.version }}"
+          tag_name: "NaiLink_Official_v${{ steps.pack.outputs.version }}"
+          name: "NaiLink Official v${{ steps.pack.outputs.version }}"
           files: output/*.run
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
