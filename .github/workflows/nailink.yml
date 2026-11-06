@@ -1,4 +1,4 @@
-name: Make NaiLink run files
+name: Make NaiLink Complete run files
 
 on:
   workflow_dispatch:
@@ -7,57 +7,80 @@ jobs:
   make-run:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: 安装 makeself 和 jq
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y makeself curl jq
 
-      - name: 动态获取 NaiLink x86_64 IPK 下载链接
-        id: get_ipk
+      - name: Get NaiLink x86_64 IPK Assets
+        id: get_assets
         run: |
-          # 调用 GitHub API 获取 openwrt-v0.6.75 这个 Release 的所有 Assets
+          # 使用 GitHub API 获取指定 Release 的所有 Assets
           ASSETS=$(curl -s https://api.github.com/repos/slobys/NaiLink/releases/tags/openwrt-v0.6.75)
-          # 用 jq 筛选出文件名同时包含 x86_64 和 .ipk 的下载链接
-          DOWNLOAD_URL=$(echo "$ASSETS" | jq -r '.assets[] | select(.name | test("x86_64") and test("\\.ipk$")) | .browser_download_url')
           
-          if [ -z "$DOWNLOAD_URL" ]; then
-            echo "错误：未找到 x86_64 架构的 .ipk 文件，请检查 Release 页面。"
+          # 筛选核心 IPK (包含 x86_64 和 .ipk，且不包含 luci)
+          CORE_URL=$(echo "$ASSETS" | jq -r '.assets[] | select(.name | test("x86_64") and test("\\.ipk$") and (test("luci") | not)) | .browser_download_url')
+          
+          # 筛选 LuCI 界面 IPK (包含 luci-app-nailink 和 .ipk)
+          LUCI_URL=$(echo "$ASSETS" | jq -r '.assets[] | select(.name | test("luci-app-nailink.*\\.ipk$")) | .browser_download_url')
+          
+          # 筛选中文语言包 IPK (包含 luci-i18n-nailink-zh-cn 和 .ipk)
+          I18N_URL=$(echo "$ASSETS" | jq -r '.assets[] | select(.name | test("luci-i18n-nailink-zh-cn.*\\.ipk$")) | .browser_download_url')
+
+          if [ -z "$CORE_URL" ] || [ -z "$LUCI_URL" ]; then
+            echo "错误：未能自动找到核心或 LuCI 界面 IPK，请检查 Release 页面。"
             exit 1
           fi
-          
-          echo "找到下载链接: $DOWNLOAD_URL"
-          echo "url=$DOWNLOAD_URL" >> $GITHUB_OUTPUT
 
-      - name: 下载 IPK 并准备 install.sh
+          echo "core_url=$CORE_URL" >> $GITHUB_OUTPUT
+          echo "luci_url=$LUCI_URL" >> $GITHUB_OUTPUT
+          echo "i18n_url=$I18N_URL" >> $GITHUB_OUTPUT
+
+      - name: Download IPK files
         run: |
-          mkdir -p x86_64
-          wget -O x86_64/nailink.ipk "${{ steps.get_ipk.outputs.url }}"
-          
-          # RunFilesBuilder 仓库通常自带 shell/install.sh，直接拷贝
-          cp shell/install.sh x86_64/install.sh
-          chmod +x x86_64/install.sh
-          ls -lh x86_64/
+          mkdir -p build
+          wget -O "build/nailink-core.ipk" "${{ steps.get_assets.outputs.core_url }}"
+          wget -O "build/luci-app-nailink.ipk" "${{ steps.get_assets.outputs.luci_url }}"
+          # 语言包可能不存在，存在则下载
+          if [ -n "${{ steps.get_assets.outputs.i18n_url }}" ]; then
+            wget -O "build/luci-i18n-nailink-zh-cn.ipk" "${{ steps.get_assets.outputs.i18n_url }}"
+          fi
+          ls -lh build/
 
-      - name: 打包为 .run 文件
+      - name: Prepare install.sh
+        run: |
+          # 生成安装脚本，自动安装 build 目录下的所有 ipk
+          cat > build/install.sh << 'EOF'
+          #!/bin/sh
+          echo "正在更新软件包列表..."
+          opkg update
+          echo "正在安装 NaiLink 及其界面..."
+          opkg install ./*.ipk
+          echo "安装完成。正在重启 LuCI 服务..."
+          /etc/init.d/uhttpd restart
+          EOF
+          chmod +x build/install.sh
+
+      - name: Package as .run file
         id: pack
         run: |
           mkdir -p output
-          VERSION="0.6.75" # 与 Tag openwrt-v0.6.75 对应
-          cd x86_64
-          makeself . "../output/NaiLink_x86_64_${VERSION}.run" \
-            "NaiLink x86_64 Installer v${VERSION}" \
+          VERSION="0.6.75"
+          cd build
+          makeself . "../output/NaiLink_Complete_x86_64_${VERSION}.run" \
+            "NaiLink Complete Installer (Core + LuCI) v${VERSION}" \
             ./install.sh
           cd ..
           ls -lh output/
 
-      - name: 上传 .run 文件到 Release
+      - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "NaiLink_v${{ steps.pack.outputs.version }}"
-          name: "NaiLink v${{ steps.pack.outputs.version }}"
+          tag_name: "NaiLink_Complete_v${{ steps.pack.outputs.version }}"
+          name: "NaiLink Complete v${{ steps.pack.outputs.version }}"
           files: output/*.run
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
